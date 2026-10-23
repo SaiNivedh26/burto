@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "burto"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "pydantic",
+    "python-dotenv",
+    "langsmith",
+    "openai",
+    "tavily-python",
+    "mcp",
+]
+
+[project.scripts]
+burto-hook-server = "burto.hook_server:app"
+burto-mcp = "burto.mcp_server:mcp"

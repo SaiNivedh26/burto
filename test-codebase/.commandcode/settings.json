@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "shell|write|edit|read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
