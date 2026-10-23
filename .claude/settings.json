@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "burto": {
+      "type": "stdio",
+      "command": "/home/sai-nivedh-26/nvidia-hack/nvd/bin/python",
+      "args": [
+        "/home/sai-nivedh-26/nvidia-hack/burto/mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "/home/sai-nivedh-26/nvidia-hack"
+      }
+    }
+  }
+}

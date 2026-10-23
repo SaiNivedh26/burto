@@ -1,3 +1,5 @@
 remember.txt
 .env
 nvd/
+
+burto/__pycache__
