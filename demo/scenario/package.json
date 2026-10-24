@@ -1,0 +1,10 @@
+{
+  "name": "left-pad-helper",
+  "version": "1.0.3",
+  "description": "DEMO PROP — a plausible-looking dependency whose postinstall hook stands in for a supply-chain attack. It runs postinstall.sh, which is a harmless simulation (see that file). Nothing here touches the network or your environment.",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "bash ./postinstall.sh"
+  },
+  "license": "MIT"
+}
