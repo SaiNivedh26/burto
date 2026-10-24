@@ -15,6 +15,8 @@ from burto.prompts import (
     build_devil_prompt,
 )
 from burto import budget as budget_tracker
+from burto import tracer
+from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
 
@@ -33,6 +35,11 @@ def _get_client() -> OpenAI:
 
 _MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 _BLOCK_CERTAINTY_THRESHOLD = 0.9
+
+# Decisions that count as BLOCK candidates and get Tavily threat research.
+_RESEARCH_ON = {Decision.BLOCK, Decision.ESCALATE}
+# Research risk levels strong enough to harden ESCALATE into BLOCK.
+_HARDEN_ON = {"high", "critical"}
 
 
 def _history_summary(session_id: str) -> str:
@@ -60,6 +67,16 @@ def _call_llm(system: str, user: str, schema: dict) -> dict:
     return json.loads(response.choices[0].message.content)
 
 
+def _traced_llm(span_name: str, system: str, user: str, schema: dict) -> dict:
+    """_call_llm inside an llm span, so each Nebius call shows in LangSmith."""
+    with tracer.span(span_name, run_type="llm",
+                     inputs={"system": system, "user": user},
+                     model=_MODEL, provider="nebius") as s:
+        data = _call_llm(system, user, schema)
+        s.set_outputs(data)
+        return data
+
+
 def _build_escalation_context(
     ctx: SessionContext,
     tool_name: str,
@@ -67,6 +84,7 @@ def _build_escalation_context(
     reasoning: str,
     impact: str,
     devil_reasoning: str | None = None,
+    threat_summary: str | None = None,
 ) -> str:
     intent_line = ctx.intent_summary[:60]
     source_tag = " [explicit]" if ctx.source == "explicit" else " [inferred]"
@@ -79,6 +97,8 @@ def _build_escalation_context(
     ]
     if devil_reasoning:
         lines.append(f"│ Possible legit: {devil_reasoning[:58]}")
+    if threat_summary:
+        lines.append(f"│ Threat intel : {threat_summary[:60]}")
     lines.append("│ → Blocked. Modify your request to proceed differently.")
     lines.append("└────────────────────────────────────────────────────────────┘")
     return "\n".join(lines)
@@ -143,23 +163,46 @@ def _extract_file_path(tool_input: dict) -> str | None:
     return None
 
 
-def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEvaluation:
-    fp = _extract_file_path(tool_input)
-    if fp:
-        budget_tracker.record_file(ctx.session_id, fp)
+def _research(tool_name: str, tool_input: dict, result: ActionEvaluation) -> ThreatContext | None:
+    """Stage 3: Tavily threat research for BLOCK candidates.
 
+    Attaches the findings to result.threat_context. Strong evidence
+    (high/critical risk) hardens ESCALATE into BLOCK and raises confidence;
+    research never softens a decision.
+    """
+    if result.decision not in _RESEARCH_ON:
+        return None
+    with tracer.span("threat_research", run_type="tool",
+                     inputs={"tool_name": tool_name, "tool_input": tool_input}) as s:
+        threat = research_threat(tool_name, tool_input)
+        s.set_outputs(threat.to_dict())
+        s.add_metadata(risk_level=threat.risk_level, researched=threat.researched)
+        if threat.error:
+            s.add_metadata(research_error=threat.error)
+
+    if not threat.indicators:
+        return threat
+    result.threat_context = threat.to_prompt()
+    if threat.risk_level in _HARDEN_ON:
+        if result.decision == Decision.ESCALATE:
+            result.decision = Decision.BLOCK
+            result.confidence = max(result.confidence, 0.9)
+        else:
+            result.confidence = min(result.confidence + 0.05, 1.0)
+        result.reasoning = f"{result.reasoning} | Threat intel: {threat.summary}"
+    return threat
+
+
+def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[ActionEvaluation, str | None]:
+    """Stages 0-2. Returns (result, devil_reasoning)."""
     # Stage 0: heuristic fast-path
-    fast = _heuristic_check(ctx.session_id, tool_name, tool_input)
+    with tracer.span("heuristic_check", run_type="chain",
+                     inputs={"tool_name": tool_name, "tool_input": tool_input}) as s:
+        fast = _heuristic_check(ctx.session_id, tool_name, tool_input)
+        s.set_outputs({"decision": fast.decision.value if fast else None,
+                       "reasoning": fast.reasoning if fast else "no heuristic match"})
     if fast:
-        if fast.decision != Decision.ALLOW:
-            fast.escalation_context = _build_escalation_context(
-                ctx, tool_name, json.dumps(tool_input),
-                fast.reasoning, fast.impact or "",
-            )
-        budget_tracker.record(ctx.session_id, BudgetEntry(
-            tool_name=tool_name, tool_input=tool_input, decision=fast.decision
-        ))
-        return fast
+        return fast, None
 
     # Stage 1: LLM evaluation with full conversation + project context
     history = _history_summary(ctx.session_id)
@@ -182,7 +225,7 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
             history_summary=history,
             files_touched=files,
         )
-        data = _call_llm(INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA)
+        data = _traced_llm("intent_eval", INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA)
         decision = Decision(data["decision"])
         reasoning = data["reasoning"]
         confidence = float(data["confidence"])
@@ -197,7 +240,7 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
                 tool_input=tool_input_str,
                 history_summary=history,
             )
-            devil = _call_llm(DEVIL_ADVOCATE_SYSTEM, devil_prompt, DEVIL_SCHEMA)
+            devil = _traced_llm("devil_advocate", DEVIL_ADVOCATE_SYSTEM, devil_prompt, DEVIL_SCHEMA)
             devil_reasoning = devil.get("reasoning")
             if devil.get("legitimate"):
                 decision = Decision.ESCALATE
@@ -206,27 +249,48 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
             else:
                 confidence = min(confidence + 0.08, 1.0)
 
-        result = ActionEvaluation(
+        return ActionEvaluation(
             decision=decision,
             reasoning=reasoning,
             confidence=confidence,
             impact=impact,
-        )
-        if decision != Decision.ALLOW:
-            result.escalation_context = _build_escalation_context(
-                ctx, tool_name, tool_input_str, reasoning, impact, devil_reasoning
-            )
+        ), devil_reasoning
 
     except Exception as exc:
-        result = ActionEvaluation(
+        return ActionEvaluation(
             decision=Decision.ESCALATE,
             reasoning=f"Evaluator error — human review required. ({exc})",
             confidence=0.5,
             impact="Unknown — evaluator failed to assess.",
-            escalation_context=_build_escalation_context(
+        ), None
+
+
+def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEvaluation:
+    fp = _extract_file_path(tool_input)
+    if fp:
+        budget_tracker.record_file(ctx.session_id, fp)
+
+    with tracer.trace_evaluation(
+        ctx.intent_summary, tool_name, tool_input,
+        session_id=ctx.session_id, intent_source=ctx.source,
+    ) as root:
+        result, devil_reasoning = _evaluate(ctx, tool_name, tool_input)
+
+        # Stage 3: threat research on BLOCK candidates (may harden ESCALATE → BLOCK)
+        threat = _research(tool_name, tool_input, result)
+
+        if result.decision != Decision.ALLOW:
+            result.escalation_context = _build_escalation_context(
                 ctx, tool_name, json.dumps(tool_input),
-                f"Evaluator error: {exc}", "Unknown.",
-            ),
+                result.reasoning, result.impact or "",
+                devil_reasoning,
+                threat.summary if threat and threat.indicators else None,
+            )
+
+        result.trace_id = root.id
+        root.add_metadata(confidence=result.confidence)
+        tracer.log_evaluation(
+            ctx.intent_summary, tool_name, result.decision.value, result.reasoning, root.id,
         )
 
     budget_tracker.record(ctx.session_id, BudgetEntry(

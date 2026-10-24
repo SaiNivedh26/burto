@@ -23,6 +23,7 @@ class ActionEvaluation(BaseModel):
     impact: str | None = None           # what the command could actually do if run
     escalation_context: str | None = None  # structured context block shown to dev on ESCALATE
     threat_context: str | None = None   # Tavily threat intel (P1)
+    trace_id: str | None = None         # LangSmith trace for this evaluation (P1)
 
 
 class ToolCall(BaseModel):

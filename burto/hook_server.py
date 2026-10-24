@@ -45,6 +45,8 @@ class HookResponse(BaseModel):
     confidence: float
     impact: str | None = None
     escalation_context: str | None = None
+    threat_context: str | None = None  # Tavily research, set on BLOCK candidates
+    trace_id: str | None = None        # LangSmith trace for this evaluation
     intent_source: str = "inferred"   # "inferred" | "explicit"
     action: str                        # "proceed" | "block"
 
@@ -82,6 +84,8 @@ async def pretooluse(payload: HookPayload):
         confidence=result.confidence,
         impact=result.impact,
         escalation_context=result.escalation_context,
+        threat_context=result.threat_context,
+        trace_id=result.trace_id,
         intent_source=ctx.source,
         action=action,
     )
