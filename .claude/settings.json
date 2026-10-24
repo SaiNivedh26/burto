@@ -10,5 +10,18 @@
         "PYTHONPATH": "/home/sai-nivedh-26/nvidia-hack"
       }
     }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sai-nivedh-26/nvidia-hack/claude_code_hooks/pretooluse.sh"
+          }
+        ]
+      }
+    ]
   }
 }
