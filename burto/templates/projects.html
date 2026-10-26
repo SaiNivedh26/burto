@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Projects — Burto{% endblock %}
+{% block content %}
+<h1>Projects</h1>
+<p class="subtitle">All projects that have been evaluated by Burto</p>
+
+{% if not projects %}
+<div class="empty">No projects yet.</div>
+{% else %}
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Project</th>
+        <th>Path</th>
+        <th>Sessions</th>
+        <th>Block Rate</th>
+        <th>Avg Latency</th>
+        <th>Risk Tier</th>
+        <th>Last Active</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for p in projects %}
+      <tr>
+        <td><a href="/projects/{{ p.root | urlencode }}">{{ p.name or p.root }}</a></td>
+        <td class="truncate mono" title="{{ p.root }}">{{ p.root }}</td>
+        <td>{{ p.session_count }}</td>
+        <td>
+          {% set stats = stats_map.get(p.root, {}) %}
+          {% if stats.get('total', 0) > 0 %}
+            {% set rate = (stats.block_rate * 100) | round(0) | int %}
+            <span style="color: {% if rate > 30 %}var(--red){% elif rate > 10 %}var(--yellow){% else %}var(--green){% endif %}">
+              {{ rate }}%
+            </span>
+            <span style="color: var(--muted); font-size: 11px;">({{ stats.blocked }}/{{ stats.total }})</span>
+          {% else %}—{% endif %}
+        </td>
+        <td style="color: var(--muted)">
+          {% if stats.get('latency_avg_ms') %}{{ stats.latency_avg_ms }}ms{% else %}—{% endif %}
+        </td>
+        <td>
+          <span class="badge" style="background: #1e293b; color: var(--muted);">{{ p.risk_tier or 'standard' }}</span>
+        </td>
+        <td style="color: var(--muted)">
+          {% if p.last_active %}{{ p.last_active | int | ts }}{% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

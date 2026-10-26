@@ -5,20 +5,45 @@ Accepts the full PreToolUse payload from cmdc / Claude Code / any coding agent.
 Infers task intent from the live transcript — no explicit declaration needed.
 """
 from __future__ import annotations
+import datetime
+import json
 import os
+import urllib.parse
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from jinja2 import Environment, FileSystemLoader
 from pydantic import BaseModel
 from typing import Any
 
 from burto import intent_registry, budget as budget_tracker
 from burto import evaluator
 from burto import context_builder
+from burto import store
 from burto.models import Decision, TaskIntent
 
 load_dotenv()
 
 app = FastAPI(title="burto")
+
+_TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+_jinja = Environment(loader=FileSystemLoader(_TEMPLATES_DIR), autoescape=True)
+
+
+def _ts_filter(ts: float) -> str:
+    try:
+        return datetime.datetime.fromtimestamp(ts).strftime("%m/%d %H:%M:%S")
+    except Exception:
+        return str(ts)
+
+
+_jinja.filters["ts"] = _ts_filter
+_jinja.filters["urlencode"] = urllib.parse.quote
+
+
+def _render(template_name: str, **ctx) -> HTMLResponse:
+    html = _jinja.get_template(template_name).render(**ctx)
+    return HTMLResponse(content=html)
 DEFAULT_SESSION = "default"
 
 
@@ -130,3 +155,62 @@ async def get_status(session_id: str):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+# ── Dashboard routes ──────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard_index():
+    sessions = store.get_sessions(limit=100)
+    return _render("index.html", sessions=sessions, active="home")
+
+
+@app.get("/sessions/{session_id}", response_class=HTMLResponse)
+async def dashboard_session(session_id: str):
+    session = store.get_session(session_id)
+    if not session:
+        return HTMLResponse("<h2>Session not found</h2>", status_code=404)
+    decisions = store.get_decisions_for_session(session_id)
+    return _render("session.html", session=session, decisions=decisions)
+
+
+@app.get("/projects", response_class=HTMLResponse)
+async def dashboard_projects():
+    projects = store.get_projects()
+    stats_map = {p["root"]: store.get_project_stats(p["root"]) for p in projects}
+    return _render("projects.html", projects=projects, stats_map=stats_map, active="projects")
+
+
+@app.get("/projects/{root:path}", response_class=HTMLResponse)
+async def dashboard_project(root: str):
+    root = urllib.parse.unquote(root)
+    project = store.get_project(root)
+    if not project:
+        return HTMLResponse("<h2>Project not found</h2>", status_code=404)
+    stats = store.get_project_stats(root)
+    return _render("project.html", project=project, stats=stats)
+
+
+@app.get("/export", response_class=HTMLResponse)
+async def dashboard_export():
+    from collections import Counter
+    projects = store.get_projects()
+    all_decisions = store.export_decisions()
+    counts = Counter(d["project_root"] for d in all_decisions)
+    for p in projects:
+        p["decision_count"] = counts.get(p["root"], 0)
+    return _render("export.html", projects=projects, total=len(all_decisions), active="export")
+
+
+@app.get("/export/json")
+async def export_json(project: str | None = None):
+    rows = store.export_decisions(project_root=project)
+    return JSONResponse(content=rows)
+
+
+@app.get("/export/jsonl")
+async def export_jsonl(project: str | None = None):
+    rows = store.export_decisions(project_root=project)
+    body = "\n".join(json.dumps(r) for r in rows)
+    return Response(content=body, media_type="application/x-ndjson",
+                    headers={"Content-Disposition": "attachment; filename=decisions.jsonl"})

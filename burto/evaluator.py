@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -16,6 +17,7 @@ from burto.prompts import (
 )
 from burto import budget as budget_tracker
 from burto import tracer
+from burto import store
 from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
@@ -270,6 +272,8 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     if fp:
         budget_tracker.record_file(ctx.session_id, fp)
 
+    t0 = time.time()
+
     with tracer.trace_evaluation(
         ctx.intent_summary, tool_name, tool_input,
         session_id=ctx.session_id, intent_source=ctx.source,
@@ -292,6 +296,32 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
         tracer.log_evaluation(
             ctx.intent_summary, tool_name, result.decision.value, result.reasoning, root.id,
         )
+
+    latency_ms = (time.time() - t0) * 1000
+
+    # Determine evaluation stage for observability
+    if result.confidence == 1.0 and result.decision in (Decision.BLOCK, Decision.ESCALATE):
+        stage = "heuristic"
+    else:
+        stage = "llm"
+
+    store.record_decision(
+        id=result.trace_id or root.id,
+        session_id=ctx.session_id,
+        project_root=ctx.project_root,
+        agent="cmdc",
+        tool_name=tool_name,
+        tool_input=tool_input,
+        decision=result.decision.value,
+        stage=stage,
+        model_used=_MODEL,
+        confidence=result.confidence,
+        reasoning=result.reasoning,
+        impact=result.impact,
+        threat_context=result.threat_context,
+        trace_id=result.trace_id,
+        latency_ms=latency_ms,
+    )
 
     budget_tracker.record(ctx.session_id, BudgetEntry(
         tool_name=tool_name, tool_input=tool_input, decision=result.decision

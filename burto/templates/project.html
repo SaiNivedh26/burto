@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name or project.root }} — Burto{% endblock %}
+{% block content %}
+<a href="/projects" style="color: var(--muted); font-size: 13px;">← Projects</a>
+<h1 style="margin-top: 8px;">{{ project.name or project.root }}</h1>
+<p class="subtitle mono" style="font-size: 12px;">{{ project.root }}</p>
+
+<div class="grid-4" style="margin-bottom: 20px;">
+  <div class="card stat">
+    <div class="stat-value">{{ stats.total }}</div>
+    <div class="stat-label">Total Decisions</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value" style="color: var(--red)">{{ stats.blocked }}</div>
+    <div class="stat-label">Blocked</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value">{{ (stats.block_rate * 100) | round(0) | int }}%</div>
+    <div class="stat-label">Block Rate</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value">{{ stats.latency_avg_ms }}ms</div>
+    <div class="stat-label">Avg Latency</div>
+  </div>
+</div>
+
+{% if stats.top_blocks %}
+<div class="card">
+  <div class="card-title">Top Blocked Actions</div>
+  <table class="table">
+    <thead>
+      <tr><th>Tool</th><th>Input</th><th>Count</th></tr>
+    </thead>
+    <tbody>
+    {% for b in stats.top_blocks %}
+      <tr>
+        <td class="mono">{{ b.tool_name }}</td>
+        <td class="truncate mono" title="{{ b.tool_input }}">{{ b.tool_input[:80] if b.tool_input else '—' }}</td>
+        <td><span class="badge badge-block">{{ b.cnt }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-title">Project Settings</div>
+  <table class="table">
+    <tbody>
+      <tr><td style="color: var(--muted)">Risk Tier</td><td>{{ project.risk_tier or 'standard' }}</td></tr>
+      <tr><td style="color: var(--muted)">Active Model</td><td class="mono">{{ project.active_model or 'super' }}</td></tr>
+      <tr><td style="color: var(--muted)">Fine-tuned Model</td><td class="mono">{{ project.ft_model_id or '—' }}</td></tr>
+      <tr><td style="color: var(--muted)">Sessions</td><td>{{ project.session_count }}</td></tr>
+      <tr><td style="color: var(--muted)">First Seen</td><td style="color: var(--muted)">{% if project.first_seen %}{{ project.first_seen | int | ts }}{% else %}—{% endif %}</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endblock %}

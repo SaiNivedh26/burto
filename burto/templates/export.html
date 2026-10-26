@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Export — Burto{% endblock %}
+{% block content %}
+<h1>Export</h1>
+<p class="subtitle">Download decision data as JSON or JSONL for analysis and fine-tuning</p>
+
+<div class="card">
+  <div class="card-title">Download All Decisions</div>
+  <p style="color: var(--muted); margin-bottom: 16px; font-size: 13px;">
+    Exports every recorded decision as JSON ({{ total }} total records).
+  </p>
+  <a href="/export/json" style="display: inline-block; background: var(--accent); color: white; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;">
+    Download JSON
+  </a>
+  &nbsp;
+  <a href="/export/jsonl" style="display: inline-block; background: #374151; color: var(--text); padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;">
+    Download JSONL
+  </a>
+</div>
+
+{% if projects %}
+<div class="card">
+  <div class="card-title">Per-Project Export</div>
+  <table class="table">
+    <thead>
+      <tr><th>Project</th><th>Decisions</th><th>Export</th></tr>
+    </thead>
+    <tbody>
+    {% for p in projects %}
+      <tr>
+        <td class="mono truncate" title="{{ p.root }}">{{ p.root }}</td>
+        <td>{{ p.decision_count }}</td>
+        <td>
+          <a href="/export/json?project={{ p.root | urlencode }}">JSON</a>
+          &nbsp;·&nbsp;
+          <a href="/export/jsonl?project={{ p.root | urlencode }}">JSONL</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

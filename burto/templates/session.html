@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Session {{ session.id[:12] }} — Burto{% endblock %}
+{% block content %}
+<a href="/" style="color: var(--muted); font-size: 13px;">← Sessions</a>
+<h1 style="margin-top: 8px;">Session <span class="mono" style="font-size: 16px;">{{ session.id[:24] }}</span></h1>
+<p class="subtitle">{{ session.project_root or 'Unknown project' }} · {{ session.agent or 'unknown agent' }}</p>
+
+<div class="grid-4" style="margin-bottom: 20px;">
+  <div class="card stat">
+    <div class="stat-value">{{ session.action_count }}</div>
+    <div class="stat-label">Total Actions</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value" style="color: var(--green)">{{ session.action_count - session.blocked_count }}</div>
+    <div class="stat-label">Allowed</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value" style="color: var(--red)">{{ session.blocked_count }}</div>
+    <div class="stat-label">Blocked</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value" style="color: var(--yellow)">{{ session.override_count }}</div>
+    <div class="stat-label">Overrides</div>
+  </div>
+</div>
+
+{% if not decisions %}
+<div class="empty">No decisions recorded for this session.</div>
+{% else %}
+<div class="card">
+  <div class="card-title">Decision Log</div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Tool</th>
+        <th>Input</th>
+        <th>Decision</th>
+        <th>Stage</th>
+        <th>Confidence</th>
+        <th>Latency</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for d in decisions %}
+      <tr>
+        <td style="color: var(--muted); white-space: nowrap;">{{ d.ts | int | ts }}</td>
+        <td class="mono">{{ d.tool_name }}</td>
+        <td class="truncate mono" title="{{ d.tool_input }}">{{ d.tool_input[:60] if d.tool_input else '—' }}</td>
+        <td>
+          <span class="badge badge-{{ d.decision | lower }}">{{ d.decision }}</span>
+        </td>
+        <td style="color: var(--muted)">{{ d.stage or '—' }}</td>
+        <td>
+          {% if d.confidence is not none %}
+            <span class="confidence-bar">
+              <span class="confidence-fill" style="width: {{ (d.confidence * 100) | int }}%; background: {% if d.confidence > 0.85 %}var(--red){% elif d.confidence > 0.6 %}var(--yellow){% else %}var(--green){% endif %};"></span>
+            </span>
+            <span style="color: var(--muted); font-size: 12px; margin-left: 6px;">{{ (d.confidence * 100) | round(0) | int }}%</span>
+          {% else %}—{% endif %}
+        </td>
+        <td style="color: var(--muted)">
+          {% if d.latency_ms %}{{ d.latency_ms | round(0) | int }}ms{% else %}—{% endif %}
+        </td>
+      </tr>
+      {% if d.reasoning %}
+      <tr>
+        <td colspan="7" style="padding: 4px 12px 12px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border);">
+          ↳ {{ d.reasoning[:200] }}{% if d.reasoning | length > 200 %}…{% endif %}
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
