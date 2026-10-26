@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

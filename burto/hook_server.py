@@ -263,6 +263,22 @@ async def get_project_policy(root: str):
         return {"exists": False, "template": template}
 
 
+@app.post("/projects/{root:path}/analyze")
+async def trigger_project_analysis(root: str):
+    """Force a fresh repo analysis and policy.yaml generation for this project."""
+    from burto import analyzer
+    from pathlib import Path
+    root = urllib.parse.unquote(root).removesuffix("/analyze")
+    # Clear from already-analyzed set so it runs again even if it ran before
+    with analyzer._lock:
+        analyzer._analyzed.discard(root)
+    policy_path = Path(root) / ".burto" / "policy.yaml"
+    policy_path.unlink(missing_ok=True)
+    analyzer.maybe_analyze_async(root)
+    return {"status": "analysis_started", "project_root": root,
+            "policy_path": str(policy_path)}
+
+
 @app.get("/projects/{root:path}/model")
 async def get_project_model(root: str):
     root = urllib.parse.unquote(root).removesuffix("/model")

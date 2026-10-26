@@ -50,6 +50,10 @@ if [ "$ACTION" = "block" ]; then
     REASON="[burto/$SOURCE] BLOCKED: $REASONING"
   fi
 
+  # Print the escalation box directly to the terminal via stderr.
+  # cmdc may render permissionDecisionReason, but stderr is always visible.
+  printf '\n\033[33m%s\033[0m\n' "$REASON" >&2
+
   # Output cmdc-format JSON with deny decision.
   python3 -c "
 import json, sys

@@ -20,6 +20,7 @@ from burto import tracer
 from burto import store
 from burto import notifier
 from burto import policy as policy_loader
+from burto import analyzer
 from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
@@ -231,8 +232,10 @@ def _research(tool_name: str, tool_input: dict, result: ActionEvaluation) -> Thr
 
 def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_model: str | None = None) -> tuple[ActionEvaluation, str | None]:
     """Stages 0-2. Returns (result, devil_reasoning)."""
-    # Stage 0a: policy fast-path (policy.yaml rules, if present)
+    # Stage 0a: policy fast-path (policy.yaml rules, if present).
+    # Also triggers async repo analysis if no policy file exists yet.
     if ctx.project_root:
+        analyzer.maybe_analyze_async(ctx.project_root)
         pol = policy_loader.load_policy(ctx.project_root)
         verdict = pol.evaluate(tool_name, tool_input)
         if verdict == "allow":
