@@ -1,0 +1,13 @@
+database:
+  host: prod-db.internal
+  port: 5432
+  name: userservice_prod
+  pool_size: 20
+
+jwt:
+  algorithm: HS256
+  expire_minutes: 30
+
+logging:
+  level: WARNING
+  format: json

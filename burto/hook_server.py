@@ -265,18 +265,24 @@ async def get_project_policy(root: str):
 
 @app.post("/projects/{root:path}/analyze")
 async def trigger_project_analysis(root: str):
-    """Force a fresh repo analysis and policy.yaml generation for this project."""
+    """
+    Write .burto/CLAUDE.md skill file into the project.
+    The coding agent will read it, analyze the codebase itself, and write policy.yaml.
+    No burto LLM calls — analysis is done by the agent on its next session.
+    """
     from burto import analyzer
     from pathlib import Path
     root = urllib.parse.unquote(root).removesuffix("/analyze")
-    # Clear from already-analyzed set so it runs again even if it ran before
     with analyzer._lock:
         analyzer._analyzed.discard(root)
-    policy_path = Path(root) / ".burto" / "policy.yaml"
-    policy_path.unlink(missing_ok=True)
-    analyzer.maybe_analyze_async(root)
-    return {"status": "analysis_started", "project_root": root,
-            "policy_path": str(policy_path)}
+    skill_path = Path(root) / ".burto" / "CLAUDE.md"
+    wrote = analyzer.maybe_write_skill(root)
+    return {
+        "status": "skill_written" if wrote else "policy_already_exists",
+        "project_root": root,
+        "skill_path": str(skill_path),
+        "next_step": "Start a cmdc/CC session in this project — the agent will read .burto/CLAUDE.md and generate policy.yaml automatically.",
+    }
 
 
 @app.get("/projects/{root:path}/model")
