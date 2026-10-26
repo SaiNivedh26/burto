@@ -141,11 +141,14 @@ def _parse(path: Path, project_root: str) -> Policy:
     for action_key in ("allow", "deny", "escalate"):
         for raw_rule in data.get(action_key, []):
             try:
+                # `pattern` is a user-friendly alias: substring match compiled to regex
+                pattern = raw_rule.get("pattern")
+                cmd_regex = raw_rule.get("command_regex") or (re.escape(pattern) if pattern else None)
                 rules.append(PolicyRule(
                     tool=raw_rule.get("tool", "*"),
                     action=action_key,
                     command_prefix=raw_rule.get("command_prefix"),
-                    command_regex=raw_rule.get("command_regex"),
+                    command_regex=cmd_regex,
                     path_glob=raw_rule.get("path_glob"),
                 ))
             except Exception as e:

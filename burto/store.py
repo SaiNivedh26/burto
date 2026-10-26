@@ -450,14 +450,18 @@ def export_decisions(
         return [dict(r) for r in rows]
 
 
+_PROCESS_START = time.time()  # cache only applies to decisions written after process started
+
+
 def get_cached_decision(tool_input_hash: str, session_id: str) -> dict | None:
-    """Return a previous ALLOW decision for this hash in this session (cache hit)."""
+    """Return a previous ALLOW decision for this hash in this session (cache hit).
+    Only considers decisions written after this process started (avoids stale cross-run hits)."""
     with _read_conn() as conn:
         row = conn.execute(
             """SELECT * FROM decisions
-               WHERE tool_input_hash=? AND session_id=? AND decision='ALLOW'
+               WHERE tool_input_hash=? AND session_id=? AND decision='ALLOW' AND ts >= ?
                ORDER BY ts DESC LIMIT 1""",
-            (tool_input_hash, session_id),
+            (tool_input_hash, session_id, _PROCESS_START),
         ).fetchone()
         return dict(row) if row else None
 
@@ -490,9 +494,12 @@ def get_recent_approval(tool_input_hash: str, session_id: str, within_seconds: f
 
 
 def update_project_model(project_root: str, model: str) -> None:
+    # Upsert so this works even if the project row doesn't exist yet
     _enqueue(
-        "UPDATE projects SET active_model=? WHERE root=?",
-        (model, project_root),
+        """INSERT INTO projects (root, name, first_seen, last_active, active_model)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(root) DO UPDATE SET active_model=excluded.active_model""",
+        (project_root, Path(project_root).name, time.time(), time.time(), model),
     )
 
 

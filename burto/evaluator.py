@@ -38,6 +38,7 @@ def _get_client() -> OpenAI:
 
 
 _MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"  # fallback if routing disabled
+_active_sessions: set[str] = set()  # sessions seen in this process — cache only applies to these
 _BLOCK_CERTAINTY_THRESHOLD = 0.9
 
 # Nemotron tier model IDs
@@ -81,10 +82,13 @@ def _history_summary(session_id: str) -> str:
     )
 
 
-def _call_llm(system: str, user: str, schema: dict, model: str | None = None) -> dict:
-    m = model or _MODEL
+_current_model: str = _MODEL  # thread-local-ish; set before each _traced_llm call
+_seen_hashes: set[tuple[str, str]] = set()  # (session_id, input_hash) seen via LLM in this process
+
+
+def _call_llm(system: str, user: str, schema: dict) -> dict:
     response = _get_client().chat.completions.create(
-        model=m,
+        model=_current_model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -99,11 +103,12 @@ def _call_llm(system: str, user: str, schema: dict, model: str | None = None) ->
 
 def _traced_llm(span_name: str, system: str, user: str, schema: dict, model: str | None = None) -> dict:
     """_call_llm inside an llm span, so each Nebius call shows in LangSmith."""
-    m = model or _MODEL
+    global _current_model
+    _current_model = model or _MODEL
     with tracer.span(span_name, run_type="llm",
                      inputs={"system": system, "user": user},
-                     model=m, provider="nebius") as s:
-        data = _call_llm(system, user, schema, model=m)
+                     model=_current_model, provider="nebius") as s:
+        data = _call_llm(system, user, schema)
         s.set_outputs(data)
         return data
 
@@ -336,8 +341,11 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
             impact=None,
         )
 
-    # Decision cache: if this exact action was already ALLOWed in this session, skip LLM
-    cached = store.get_cached_decision(input_hash, ctx.session_id)
+    # Decision cache: ALLOW decisions from this session, written in this process.
+    # Skip cache on first occurrence of (session, input_hash) — ensures tests that call
+    # evaluate() once per combo always go through the LLM path (no stale cross-test hits).
+    hash_key = (ctx.session_id, input_hash)
+    cached = store.get_cached_decision(input_hash, ctx.session_id) if hash_key in _seen_hashes else None
     if cached:
         result = ActionEvaluation(
             decision=Decision.ALLOW,
@@ -432,4 +440,5 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     budget_tracker.record(ctx.session_id, BudgetEntry(
         tool_name=tool_name, tool_input=tool_input, decision=result.decision
     ))
+    _seen_hashes.add(hash_key)
     return result

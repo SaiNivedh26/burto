@@ -295,6 +295,66 @@ async def set_project_model(root: str, model: str):
     return {"status": "updated", "project_root": root, "active_model": model}
 
 
+@app.get("/projects/{root:path}/train", response_class=HTMLResponse)
+async def dashboard_train(root: str):
+    """Fine-tune pipeline dashboard page for a project."""
+    from burto import finetune
+    root = urllib.parse.unquote(root).removesuffix("/train")
+    project = store.get_project(root)
+    ds = finetune.build_dataset(root)
+    examples = store.get_training_examples(root, limit=10000)
+    with store._read_conn() as conn:
+        runs = [dict(r) for r in conn.execute(
+            "SELECT * FROM ft_runs WHERE project_root=? ORDER BY started_at DESC LIMIT 10", (root,)
+        ).fetchall()]
+    return _render("train.html", project=project or {"root": root, "name": root.split("/")[-1]},
+                   ds=ds, runs=runs, total_examples=len(examples))
+
+
+@app.post("/projects/{root:path}/train/export")
+async def export_dataset(root: str):
+    from burto import finetune
+    root = urllib.parse.unquote(root).removesuffix("/train/export")
+    path, count = finetune.export_jsonl(root)
+    return {"status": "ok", "path": path, "example_count": count}
+
+
+@app.post("/projects/{root:path}/train/submit")
+async def submit_train(root: str, base_model: str = "nvidia/Nemotron-3_5-Lightning",
+                       epochs: int = 3, lora_rank: int = 16):
+    from burto import finetune
+    root = urllib.parse.unquote(root).removesuffix("/train/submit")
+    ds = finetune.build_dataset(root)
+    if ds.example_count < 10:
+        return JSONResponse({"error": f"only {ds.example_count} examples — need at least 10"}, status_code=400)
+    path, _ = finetune.export_jsonl(root)
+    ds = finetune.push_to_nebius(root, path, ds)
+    config = finetune.TrainConfig(
+        project_root=root, dataset_id=ds.id, base_model=base_model,
+        epochs=epochs, lora_rank=lora_rank,
+    )
+    config.estimated_cost_usd = finetune.estimate_cost(config, ds.example_count)
+    run = finetune.submit_sft_job(config, ds)
+    return {"status": "submitted", "run_id": run.run_id, "job_id": run.nebius_job_id,
+            "estimated_cost_usd": config.estimated_cost_usd}
+
+
+@app.get("/projects/{root:path}/train/runs/{run_id}")
+async def get_run_status(root: str, run_id: str):
+    from burto import finetune
+    status = finetune.poll_job(run_id)
+    return {"run_id": status.run_id, "status": status.status,
+            "tokens_used": status.tokens_used, "error": status.error}
+
+
+@app.post("/projects/{root:path}/train/deploy/{run_id}")
+async def deploy_run(root: str, run_id: str):
+    from burto import finetune
+    result = finetune.deploy_endpoint(run_id)
+    return {"status": result.status, "endpoint_id": result.endpoint_id,
+            "endpoint_url": result.endpoint_url, "error": result.error}
+
+
 @app.get("/projects/{root:path}", response_class=HTMLResponse)
 async def dashboard_project(root: str):
     root = urllib.parse.unquote(root)

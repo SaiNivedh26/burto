@@ -2,6 +2,7 @@
 {% block title %}{{ project.name or project.root }} — Burto{% endblock %}
 {% block content %}
 <a href="/projects" style="color: var(--muted); font-size: 13px;">← Projects</a>
+<a href="/projects/{{ project.root | urlencode }}/train" style="float: right; background: var(--accent); color: white; padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;">Train Model →</a>
 <h1 style="margin-top: 8px;">{{ project.name or project.root }}</h1>
 <p class="subtitle mono" style="font-size: 12px;">{{ project.root }}</p>
 
