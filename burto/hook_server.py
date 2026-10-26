@@ -244,6 +244,38 @@ async def dashboard_projects():
     return _render("projects.html", projects=projects, stats_map=stats_map, active="projects")
 
 
+@app.get("/projects/{root:path}/model")
+async def get_project_model(root: str):
+    root = urllib.parse.unquote(root).removesuffix("/model")
+    model = store.get_project_model(root)
+    return {"project_root": root, "active_model": model}
+
+
+@app.post("/projects/{root:path}/model-update")
+async def set_project_model_form(root: str, model: str = "super"):
+    """Form POST handler for dashboard model hot-swap."""
+    root = urllib.parse.unquote(root).removesuffix("/model-update")
+    valid_tiers = {"nano", "super", "ultra"}
+    if model in valid_tiers:
+        store.update_project_model(root, model)
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/projects/{urllib.parse.quote(root, safe='')}", status_code=303)
+
+
+@app.put("/projects/{root:path}/model")
+async def set_project_model(root: str, model: str):
+    """Hot-swap the model tier for a project without server restart."""
+    root = urllib.parse.unquote(root).removesuffix("/model")
+    valid_tiers = {"nano", "super", "ultra"}
+    if model not in valid_tiers and not model.startswith("ft:"):
+        return JSONResponse(
+            {"error": f"model must be one of {sorted(valid_tiers)} or 'ft:<id>'"},
+            status_code=400,
+        )
+    store.update_project_model(root, model)
+    return {"status": "updated", "project_root": root, "active_model": model}
+
+
 @app.get("/projects/{root:path}", response_class=HTMLResponse)
 async def dashboard_project(root: str):
     root = urllib.parse.unquote(root)

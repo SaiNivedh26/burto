@@ -49,7 +49,19 @@
   <table class="table">
     <tbody>
       <tr><td style="color: var(--muted)">Risk Tier</td><td>{{ project.risk_tier or 'standard' }}</td></tr>
-      <tr><td style="color: var(--muted)">Active Model</td><td class="mono">{{ project.active_model or 'super' }}</td></tr>
+      <tr>
+        <td style="color: var(--muted)">Active Model</td>
+        <td>
+          <form method="post" action="/projects/{{ project.root | urlencode }}/model-update" style="display: flex; gap: 8px; align-items: center;">
+            <select name="model" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font-size: 13px;">
+              <option value="nano" {% if (project.active_model or 'super') == 'nano' %}selected{% endif %}>Nano — fast/low-risk</option>
+              <option value="super" {% if (project.active_model or 'super') == 'super' %}selected{% endif %}>Super — default (recommended)</option>
+              <option value="ultra" {% if (project.active_model or 'super') == 'ultra' %}selected{% endif %}>Ultra — deep reasoning</option>
+            </select>
+            <button type="submit" style="background: var(--accent); color: white; border: none; border-radius: 4px; padding: 4px 12px; font-size: 12px; cursor: pointer;">Apply</button>
+          </form>
+        </td>
+      </tr>
       <tr><td style="color: var(--muted)">Fine-tuned Model</td><td class="mono">{{ project.ft_model_id or '—' }}</td></tr>
       <tr><td style="color: var(--muted)">Sessions</td><td>{{ project.session_count }}</td></tr>
       <tr><td style="color: var(--muted)">First Seen</td><td style="color: var(--muted)">{% if project.first_seen %}{{ project.first_seen | int | ts }}{% else %}—{% endif %}</td></tr>

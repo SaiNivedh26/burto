@@ -36,8 +36,33 @@ def _get_client() -> OpenAI:
     return _client
 
 
-_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"  # fallback if routing disabled
 _BLOCK_CERTAINTY_THRESHOLD = 0.9
+
+# Nemotron tier model IDs
+_TIER_MODELS = {
+    "nano":  "nvidia/Nemotron-3_5-Lightning",
+    "super": "nvidia/nemotron-3-super-120b-a12b",
+    "ultra": "nvidia/Nemotron-3-Ultra-550b-a55b",
+}
+_USE_ROUTING = os.getenv("BURTO_MODEL_ROUTING", "true").lower() not in {"false", "0", "no"}
+
+
+def _route_model(project_root: str | None, is_devil_pass: bool = False) -> str:
+    """Pick Nemotron tier based on project config and call type."""
+    if not _USE_ROUTING:
+        return _MODEL
+    if is_devil_pass:
+        return _TIER_MODELS["ultra"]
+    # Check project-level model override
+    if project_root:
+        active = store.get_project_model(project_root)
+        if active in _TIER_MODELS:
+            return _TIER_MODELS[active]
+        if active and active not in ("super", "nano", "ultra"):
+            # Could be an FT endpoint ID — return as-is
+            return active
+    return _TIER_MODELS["super"]
 
 # Decisions that count as BLOCK candidates and get Tavily threat research.
 _RESEARCH_ON = {Decision.BLOCK, Decision.ESCALATE}
@@ -55,9 +80,10 @@ def _history_summary(session_id: str) -> str:
     )
 
 
-def _call_llm(system: str, user: str, schema: dict) -> dict:
+def _call_llm(system: str, user: str, schema: dict, model: str | None = None) -> dict:
+    m = model or _MODEL
     response = _get_client().chat.completions.create(
-        model=_MODEL,
+        model=m,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -70,12 +96,13 @@ def _call_llm(system: str, user: str, schema: dict) -> dict:
     return json.loads(response.choices[0].message.content)
 
 
-def _traced_llm(span_name: str, system: str, user: str, schema: dict) -> dict:
+def _traced_llm(span_name: str, system: str, user: str, schema: dict, model: str | None = None) -> dict:
     """_call_llm inside an llm span, so each Nebius call shows in LangSmith."""
+    m = model or _MODEL
     with tracer.span(span_name, run_type="llm",
                      inputs={"system": system, "user": user},
-                     model=_MODEL, provider="nebius") as s:
-        data = _call_llm(system, user, schema)
+                     model=m, provider="nebius") as s:
+        data = _call_llm(system, user, schema, model=m)
         s.set_outputs(data)
         return data
 
@@ -196,7 +223,7 @@ def _research(tool_name: str, tool_input: dict, result: ActionEvaluation) -> Thr
     return threat
 
 
-def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[ActionEvaluation, str | None]:
+def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_model: str | None = None) -> tuple[ActionEvaluation, str | None]:
     """Stages 0-2. Returns (result, devil_reasoning)."""
     # Stage 0: heuristic fast-path
     with tracer.span("heuristic_check", run_type="chain",
@@ -228,22 +255,23 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[Ac
             history_summary=history,
             files_touched=files,
         )
-        data = _traced_llm("intent_eval", INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA)
+        data = _traced_llm("intent_eval", INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA, model=routed_model)
         decision = Decision(data["decision"])
         reasoning = data["reasoning"]
         confidence = float(data["confidence"])
         impact = data.get("impact", "Unknown impact.")
         devil_reasoning: str | None = None
 
-        # Stage 2: uncertain BLOCK → devil's advocate cross-check
+        # Stage 2: uncertain BLOCK → devil's advocate cross-check (Ultra tier)
         if decision == Decision.BLOCK and confidence < _BLOCK_CERTAINTY_THRESHOLD:
+            ultra_model = _route_model(ctx.project_root, is_devil_pass=True)
             devil_prompt = build_devil_prompt(
                 conversation=conversation,
                 tool_name=tool_name,
                 tool_input=tool_input_str,
                 history_summary=history,
             )
-            devil = _traced_llm("devil_advocate", DEVIL_ADVOCATE_SYSTEM, devil_prompt, DEVIL_SCHEMA)
+            devil = _traced_llm("devil_advocate", DEVIL_ADVOCATE_SYSTEM, devil_prompt, DEVIL_SCHEMA, model=ultra_model)
             devil_reasoning = devil.get("reasoning")
             if devil.get("legitimate"):
                 decision = Decision.ESCALATE
@@ -308,11 +336,13 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
 
     t0 = time.time()
 
+    routed_model = _route_model(ctx.project_root)
+
     with tracer.trace_evaluation(
         ctx.intent_summary, tool_name, tool_input,
         session_id=ctx.session_id, intent_source=ctx.source,
     ) as root:
-        result, devil_reasoning = _evaluate(ctx, tool_name, tool_input)
+        result, devil_reasoning = _evaluate(ctx, tool_name, tool_input, routed_model=routed_model)
 
         # Stage 3: threat research on BLOCK candidates (may harden ESCALATE → BLOCK)
         threat = _research(tool_name, tool_input, result)
@@ -366,7 +396,7 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
         tool_input=tool_input,
         decision=result.decision.value,
         stage=stage,
-        model_used=_MODEL,
+        model_used=routed_model,
         confidence=result.confidence,
         reasoning=result.reasoning,
         impact=result.impact,
