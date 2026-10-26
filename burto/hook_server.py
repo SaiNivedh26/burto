@@ -152,6 +152,30 @@ async def get_status(session_id: str):
     }
 
 
+@app.post("/decisions/{decision_id}/approve")
+async def approve_decision(decision_id: str, reason: str = ""):
+    """Developer approves a blocked decision. Auto-allows the same action for 60s."""
+    d = store.get_decision(decision_id)
+    if not d:
+        return JSONResponse({"error": "decision not found"}, status_code=404)
+    store.approve_decision(decision_id, reason)
+    return {"status": "approved", "decision_id": decision_id,
+            "auto_allow_window_s": 60, "tool_input_hash": d.get("tool_input_hash")}
+
+
+@app.post("/decisions/{decision_id}/reject")
+async def reject_decision(decision_id: str, reason: str = ""):
+    """Developer explicitly confirms a block (signal_type=reject)."""
+    d = store.get_decision(decision_id)
+    if not d:
+        return JSONResponse({"error": "decision not found"}, status_code=404)
+    store.record_signal(
+        decision_id=decision_id, signal_type="reject",
+        override="re_blocked", override_reason=reason or "developer confirmed block",
+    )
+    return {"status": "rejected", "decision_id": decision_id}
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

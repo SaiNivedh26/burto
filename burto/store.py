@@ -450,6 +450,33 @@ def export_decisions(
         return [dict(r) for r in rows]
 
 
+def approve_decision(decision_id: str, reason: str = "") -> None:
+    """Mark a blocked decision as developer-approved. Sets override=allowed."""
+    _enqueue(
+        "UPDATE decisions SET signal_type='accept', override='allowed', override_reason=?, override_at=? WHERE id=?",
+        (reason or "developer approved", time.time(), decision_id),
+    )
+    # Also bump override_count on the session
+    _enqueue(
+        "UPDATE sessions SET override_count = override_count + 1 WHERE id = (SELECT session_id FROM decisions WHERE id=?)",
+        (decision_id,),
+    )
+
+
+def get_recent_approval(tool_input_hash: str, session_id: str, within_seconds: float = 60.0) -> dict | None:
+    """Return the most recent approved decision for this hash in this session, if within window."""
+    cutoff = time.time() - within_seconds
+    with _read_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM decisions
+               WHERE tool_input_hash=? AND session_id=?
+                 AND override='allowed' AND override_at >= ?
+               ORDER BY override_at DESC LIMIT 1""",
+            (tool_input_hash, session_id, cutoff),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def update_project_model(project_root: str, model: str) -> None:
     _enqueue(
         "UPDATE projects SET active_model=? WHERE root=?",

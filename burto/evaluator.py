@@ -18,6 +18,7 @@ from burto.prompts import (
 from burto import budget as budget_tracker
 from burto import tracer
 from burto import store
+from burto import notifier
 from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
@@ -272,6 +273,17 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     if fp:
         budget_tracker.record_file(ctx.session_id, fp)
 
+    # Session memory: if developer approved this exact action within 60s, auto-allow
+    input_hash = store.tool_input_hash(tool_name, tool_input)
+    recent = store.get_recent_approval(input_hash, ctx.session_id, within_seconds=60.0)
+    if recent:
+        return ActionEvaluation(
+            decision=Decision.ALLOW,
+            reasoning="Auto-allowed: developer approved this action within the last 60s.",
+            confidence=1.0,
+            impact=None,
+        )
+
     t0 = time.time()
 
     with tracer.trace_evaluation(
@@ -305,8 +317,14 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     else:
         stage = "llm"
 
+    decision_id = result.trace_id or root.id
+
+    # Fire desktop notification on BLOCK/ESCALATE so developer can approve in one click
+    if result.decision != Decision.ALLOW:
+        notifier.notify_block(decision_id, tool_name, result.reasoning)
+
     store.record_decision(
-        id=result.trace_id or root.id,
+        id=decision_id,
         session_id=ctx.session_id,
         project_root=ctx.project_root,
         agent="cmdc",

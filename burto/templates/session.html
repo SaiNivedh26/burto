@@ -49,6 +49,13 @@
         <td class="truncate mono" title="{{ d.tool_input }}">{{ d.tool_input[:60] if d.tool_input else '—' }}</td>
         <td>
           <span class="badge badge-{{ d.decision | lower }}">{{ d.decision }}</span>
+          {% if d.decision in ('BLOCK', 'ESCALATE') and d.override != 'allowed' %}
+            <form method="post" action="/decisions/{{ d.id }}/approve" style="display:inline; margin-left: 6px;">
+              <button type="submit" style="background: #064e3b; color: var(--green); border: 1px solid var(--green); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Approve</button>
+            </form>
+          {% elif d.override == 'allowed' %}
+            <span style="color: var(--green); font-size: 11px; margin-left: 6px;">✓ approved</span>
+          {% endif %}
         </td>
         <td style="color: var(--muted)">{{ d.stage or '—' }}</td>
         <td>
