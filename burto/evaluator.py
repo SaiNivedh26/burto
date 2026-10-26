@@ -19,6 +19,7 @@ from burto import budget as budget_tracker
 from burto import tracer
 from burto import store
 from burto import notifier
+from burto import policy as policy_loader
 from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
@@ -225,7 +226,30 @@ def _research(tool_name: str, tool_input: dict, result: ActionEvaluation) -> Thr
 
 def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_model: str | None = None) -> tuple[ActionEvaluation, str | None]:
     """Stages 0-2. Returns (result, devil_reasoning)."""
-    # Stage 0: heuristic fast-path
+    # Stage 0a: policy fast-path (policy.yaml rules, if present)
+    if ctx.project_root:
+        pol = policy_loader.load_policy(ctx.project_root)
+        verdict = pol.evaluate(tool_name, tool_input)
+        if verdict == "allow":
+            return ActionEvaluation(
+                decision=Decision.ALLOW,
+                reasoning="Policy rule matched: explicitly allowed.",
+                confidence=1.0, impact=None,
+            ), None
+        if verdict == "deny":
+            return ActionEvaluation(
+                decision=Decision.BLOCK,
+                reasoning="Policy rule matched: explicitly denied.",
+                confidence=1.0, impact="Blocked by project policy rule.",
+            ), None
+        if verdict == "escalate":
+            return ActionEvaluation(
+                decision=Decision.ESCALATE,
+                reasoning="Policy rule matched: escalation required.",
+                confidence=1.0, impact="Escalated by project policy rule.",
+            ), None
+
+    # Stage 0b: heuristic fast-path
     with tracer.span("heuristic_check", run_type="chain",
                      inputs={"tool_name": tool_name, "tool_input": tool_input}) as s:
         fast = _heuristic_check(ctx.session_id, tool_name, tool_input)

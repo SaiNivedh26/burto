@@ -244,6 +244,25 @@ async def dashboard_projects():
     return _render("projects.html", projects=projects, stats_map=stats_map, active="projects")
 
 
+@app.get("/projects/{root:path}/policy")
+async def get_project_policy(root: str):
+    """Return parsed policy or a starter template if none exists."""
+    from burto import policy as policy_loader
+    root = urllib.parse.unquote(root).removesuffix("/policy")
+    from pathlib import Path
+    policy_path = Path(root) / ".burto" / "policy.yaml"
+    if policy_path.exists():
+        pol = policy_loader.load_policy(root)
+        return {
+            "exists": True, "risk_tier": pol.risk_tier,
+            "model_active": pol.model_active, "rule_count": len(pol.rules),
+            "deny_by_default": pol.deny_by_default,
+        }
+    else:
+        template = policy_loader.generate_policy_yaml(root)
+        return {"exists": False, "template": template}
+
+
 @app.get("/projects/{root:path}/model")
 async def get_project_model(root: str):
     root = urllib.parse.unquote(root).removesuffix("/model")
