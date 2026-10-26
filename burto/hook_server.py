@@ -152,6 +152,14 @@ async def get_status(session_id: str):
     }
 
 
+class SignalPayload(BaseModel):
+    signal_type: str  # accept | reject | edit | prompt
+    reason: str = ""
+    label: str | None = None          # ALLOW | BLOCK | ESCALATE
+    reasoning_label: str | None = None
+    edited_tool_input: dict[str, Any] | None = None  # for edit signal
+
+
 @app.post("/decisions/{decision_id}/approve")
 async def approve_decision(decision_id: str, reason: str = ""):
     """Developer approves a blocked decision. Auto-allows the same action for 60s."""
@@ -159,6 +167,14 @@ async def approve_decision(decision_id: str, reason: str = ""):
     if not d:
         return JSONResponse({"error": "decision not found"}, status_code=404)
     store.approve_decision(decision_id, reason)
+    # Create accept training example
+    store.record_signal(
+        decision_id=decision_id, signal_type="accept",
+        override="allowed", override_reason=reason or "developer approved",
+        project_root=d.get("project_root"), tool_name=d.get("tool_name"),
+        tool_input=json.loads(d["tool_input"]) if d.get("tool_input") else {},
+        label="ALLOW", reasoning_label=reason or "developer approved",
+    )
     return {"status": "approved", "decision_id": decision_id,
             "auto_allow_window_s": 60, "tool_input_hash": d.get("tool_input_hash")}
 
@@ -172,8 +188,31 @@ async def reject_decision(decision_id: str, reason: str = ""):
     store.record_signal(
         decision_id=decision_id, signal_type="reject",
         override="re_blocked", override_reason=reason or "developer confirmed block",
+        project_root=d.get("project_root"), tool_name=d.get("tool_name"),
+        tool_input=json.loads(d["tool_input"]) if d.get("tool_input") else {},
+        label="BLOCK", reasoning_label=reason or "developer confirmed block",
     )
     return {"status": "rejected", "decision_id": decision_id}
+
+
+@app.post("/decisions/{decision_id}/signal")
+async def record_signal(decision_id: str, payload: SignalPayload):
+    """Record any of the four learning signals: accept/reject/edit/prompt."""
+    d = store.get_decision(decision_id)
+    if not d:
+        return JSONResponse({"error": "decision not found"}, status_code=404)
+    store.record_signal(
+        decision_id=decision_id,
+        signal_type=payload.signal_type,
+        override=None,
+        override_reason=payload.reason or None,
+        project_root=d.get("project_root"),
+        tool_name=d.get("tool_name"),
+        tool_input=payload.edited_tool_input or (json.loads(d["tool_input"]) if d.get("tool_input") else {}),
+        label=payload.label or d.get("decision"),
+        reasoning_label=payload.reasoning_label or payload.reason or None,
+    )
+    return {"status": "ok", "signal_type": payload.signal_type, "decision_id": decision_id}
 
 
 @app.get("/health")

@@ -344,6 +344,18 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     # Fire desktop notification on BLOCK/ESCALATE so developer can approve in one click
     if result.decision != Decision.ALLOW:
         notifier.notify_block(decision_id, tool_name, result.reasoning)
+        # Auto-capture Prompt signal: the last user turn before this block
+        # reveals project-specific vocabulary and intent patterns
+        if ctx.recent_user_turns:
+            last_turn = ctx.recent_user_turns[-1]
+            store.record_signal(
+                decision_id=decision_id, signal_type="prompt",
+                project_root=ctx.project_root, tool_name=tool_name,
+                tool_input=tool_input,
+                label=result.decision.value,
+                reasoning_label=last_turn,
+                context_snapshot={"intent": ctx.intent_summary, "turn": last_turn},
+            )
 
     store.record_decision(
         id=decision_id,
