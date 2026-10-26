@@ -450,6 +450,18 @@ def export_decisions(
         return [dict(r) for r in rows]
 
 
+def get_cached_decision(tool_input_hash: str, session_id: str) -> dict | None:
+    """Return a previous ALLOW decision for this hash in this session (cache hit)."""
+    with _read_conn() as conn:
+        row = conn.execute(
+            """SELECT * FROM decisions
+               WHERE tool_input_hash=? AND session_id=? AND decision='ALLOW'
+               ORDER BY ts DESC LIMIT 1""",
+            (tool_input_hash, session_id),
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def approve_decision(decision_id: str, reason: str = "") -> None:
     """Mark a blocked decision as developer-approved. Sets override=allowed."""
     _enqueue(

@@ -284,6 +284,28 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
             impact=None,
         )
 
+    # Decision cache: if this exact action was already ALLOWed in this session, skip LLM
+    cached = store.get_cached_decision(input_hash, ctx.session_id)
+    if cached:
+        result = ActionEvaluation(
+            decision=Decision.ALLOW,
+            reasoning=f"Cache hit: previously ALLOWed in this session (id={cached['id'][:8]}).",
+            confidence=1.0,
+            impact=None,
+        )
+        store.record_decision(
+            id=str(__import__("uuid").uuid4()),
+            session_id=ctx.session_id, project_root=ctx.project_root,
+            agent="cmdc", tool_name=tool_name, tool_input=tool_input,
+            decision="ALLOW", stage="cache", model_used=None,
+            confidence=1.0, reasoning=result.reasoning, impact=None,
+            threat_context=None, trace_id=None, latency_ms=0.0,
+        )
+        budget_tracker.record(ctx.session_id, BudgetEntry(
+            tool_name=tool_name, tool_input=tool_input, decision=result.decision
+        ))
+        return result
+
     t0 = time.time()
 
     with tracer.trace_evaluation(
