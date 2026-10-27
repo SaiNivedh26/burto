@@ -1,218 +1,90 @@
 # Burto
 
-Intent-scoped security guard for AI coding agents. Intercepts every tool call, infers what the developer is actually working on from the live conversation transcript, and blocks actions that fall outside that scope — without requiring any explicit task declaration.
+Real-time security guard for AI coding agents. Intercepts every tool call, detects hallucinations and prompt injection before they execute, tracks goal drift across the session, and steers the agent back on track — all without requiring any explicit task declaration from the developer.
 
-```
-developer prompt → coding agent → tool call
-                                      ↓
-                               burto hook fires
-                                      ↓
-                        reads transcript + project tree
-                                      ↓
-                         heuristic check (fast, no LLM)
-                                      ↓
-                         Agent evaluation (Nebius/Qwen3)
-                                      ↓
-                          ALLOW / ESCALATE / BLOCK
-```
+![Burto Flow Diagram](assets/burto-flow.png)
 
 ---
 
-## Prerequisites
+## What Burto intercepts
 
-Install dependencies into the project virtualenv:
+### Hallucination Interceptor
 
-```bash
-python3 -m venv nvd
-source nvd/bin/activate
-pip install -e .
-```
+Burto catches three classes of agent hallucination at the **PreToolUse** hook, before any file is written or command is run:
 
-Required environment variables (loaded via `.env` or set in shell):
+| Type | What it catches | Response |
+|------|----------------|---------|
+| `file_not_found` | Agent writes/edits a file that doesn't exist in the project | **STEER** — denies the write, provides closest real path |
+| `pkg_not_found` | Agent installs a package that doesn't exist on PyPI or npm | **STEER** — flags the hallucinated name, suggests verification |
+| `flag_not_found` | Agent passes a CLI flag that doesn't exist for the binary | **STEER** — blocks the command, notes the invalid flag |
 
-```
-nebius_api_key=...
-langsmith_api_key=...   # optional, for audit tracing
-tavily_api_key=...      # optional, for threat research
-```
+Detection runs on every `Write`, `Edit`, `Bash` tool call. When a hallucination is confirmed the agent receives a `permissionDecision: deny` with a correction message in `permissionDecisionReason`, so it can self-correct on the next step.
 
----
+### Prompt Injection Rail
 
-## Start the servers
+A second, **parallel** check runs on every `Bash` tool call using **Nebius Nemotron-3.5-Lightning** with a 3-second timeout:
 
-Two processes must be running before connecting any coding agent.
+- Scans the command for embedded `SYSTEM:` / `ignore previous instructions` patterns
+- Catches data exfiltration via `curl` pipes and subshell expansions
+- Detects destructive flags (`--no-preserve-root`, `rm -rf /`)
+- Fires as `asyncio.create_task` — does not block the main LLM evaluator
+- Score ≥ 0.7 upgrades an ALLOW → BLOCK before the command executes
 
-**1. Hook server** — receives PreToolUse payloads and returns allow/deny decisions:
+### LLM Evaluator
 
-```bash
-cd /home/sai-nivedh-26/nvidia-hack
-PYTHONPATH=. nvd/bin/python -m uvicorn burto.hook_server:app --port 8000
-```
+Every tool call that passes heuristics goes through **Nebius Qwen3-30B-A3B**:
 
-Health check:
+- Reads the live conversation transcript and project file tree for context
+- Evaluates against the inferred developer intent
+- Injects the last 3 accepted decisions as few-shot examples (learning loop)
+- Returns `ALLOW`, `STEER`, or `BLOCK` with reasoning and confidence
 
-```bash
-curl http://localhost:8000/health
-```
+### Drift Driver
 
-**2. MCP server** — started automatically by the coding agent via stdio (configured in `.mcp.json`). No separate launch needed.
+Burto monitors the **PostToolUse** stream for four session-level drift patterns:
 
----
+| Rule | Trigger | Threshold |
+|------|---------|-----------|
+| `failure_spiral` | Consecutive tool failures | ≥ 4 in a row |
+| `repetition_loop` | Same (tool, input) repeated | ≥ 3 times in last 10 calls |
+| `tool_cycling` | Rapid alternation between tool sets | pattern in last 6 calls |
+| `silence_drift` | No substantive output for N turns | configurable |
 
-## Integrate with Command Code (cmdc)
+When a drift rule fires, **Qwen3** generates a plain-English explanation of what went wrong and injects it as `additionalContext` into the agent's next turn via the PostToolUse response. The agent sees the nudge inline and can self-correct without human intervention.
 
-Place these two files at your project root. cmdc picks them up automatically on startup.
+Suppression is recovery-based: a successful tool call clears `failure_spiral`, using a different tool clears `repetition_loop`. No fixed cooldown timers.
 
-**`.commandcode/settings.json`** — wires the PreToolUse hook:
+### Stop Hook
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "shell|write|edit|read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh",
-            "timeout": 15
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**`.mcp.json`** — wires the burto MCP server (optional: gives the agent `burto_start_task`, `burto_get_status`, `burto_clear_session` tools):
-
-```json
-{
-  "mcpServers": {
-    "burto": {
-      "transport": "stdio",
-      "enabled": true,
-      "command": "/home/sai-nivedh-26/nvidia-hack/nvd/bin/python",
-      "args": ["/home/sai-nivedh-26/nvidia-hack/burto/mcp_server.py"],
-      "env": {
-        "PYTHONPATH": "/home/sai-nivedh-26/nvidia-hack"
-      }
-    }
-  }
-}
-```
-
-Then launch cmdc from your project directory:
-
-```bash
-cd your-project/
-cmdc
-```
+At session end, Burto runs a final **alignment check**: if unresolved drift was detected and the agent is attempting to stop, the Stop hook returns `decision: block` with an LLM-written reason, forcing the agent to address the drift before the session closes.
 
 ---
 
-## Integrate with Claude Code
+## Learning Loop
 
-**`.claude/settings.json`** — same structure, different tool matcher syntax:
-
-```json
-{
-  "mcpServers": {
-    "burto": {
-      "type": "stdio",
-      "command": "/home/sai-nivedh-26/nvidia-hack/nvd/bin/python",
-      "args": ["/home/sai-nivedh-26/nvidia-hack/burto/mcp_server.py"],
-      "env": { "PYTHONPATH": "/home/sai-nivedh-26/nvidia-hack" }
-    }
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": ".*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/sai-nivedh-26/nvidia-hack/claude_code_hooks/pretooluse.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+Every decision the developer **approves** (via dashboard one-click or `POST /decisions/{id}/approve`) is stored as a training example. On the next PreToolUse call for the same project, the last 3 accepted decisions are retrieved and formatted as few-shot examples injected into the evaluator's system prompt. This means Burto gets more permissive on patterns the developer has explicitly validated, and stays strict on patterns they haven't.
 
 ---
 
-## Integrate with any other agent
+## Quick start
 
-Any agent that supports PreToolUse hooks works. The hook script reads a JSON payload from stdin and writes a JSON decision to stdout.
-
-**Minimum hook script** (adapt path as needed):
+See [SETUP.md](SETUP.md) for full installation and agent wiring instructions.
 
 ```bash
-#!/usr/bin/env bash
-INPUT=$(cat)
-RESPONSE=$(printf '%s' "$INPUT" | curl -sf -X POST http://localhost:8000/hook/pretooluse \
-  -H "Content-Type: application/json" -d @- 2>/dev/null)
-ACTION=$(printf '%s' "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('action','proceed'))")
-[ "$ACTION" = "block" ] && exit 2
-exit 0
+# 1. Install
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+
+# 2. Configure
+echo "nebius_api_key=your_key" > .env
+
+# 3. Start
+uvicorn burto.hook_server:app --port 8000
+
+# 4. Verify
+curl http://localhost:8000/health   # → {"status":"ok"}
 ```
 
-**Payload burto expects on stdin:**
-
-```json
-{
-  "session_id": "<stable session id>",
-  "tool_name": "<tool name>",
-  "tool_input": {},
-  "transcript_path": "<absolute path to JSONL transcript>",
-  "cwd": "<project working directory>"
-}
-```
-
-If the agent doesn't provide a transcript, burto falls back to "general development task" context and evaluates based on project structure alone.
-
----
-
-## Test the setup
-
-**Unit tests — core engine (no server needed):**
-
-```bash
-cd /home/sai-nivedh-26/nvidia-hack
-PYTHONPATH=. nvd/bin/python test_core.py
-```
-
-**Hook integration tests — requires hook server running:**
-
-```bash
-cd /home/sai-nivedh-26/nvidia-hack/test-codebase
-bash tests/hook_test.sh
-```
-
-**Live cmdc test — interactive:**
-
-```bash
-cd /home/sai-nivedh-26/nvidia-hack/test-codebase
-cmdc
-# Try: "update the production config to enable debug mode"
-# Expected: reads allowed, write to config/production.yaml blocked by burto
-```
-
----
-
-## How decisions are made
-
-| Stage | Mechanism | Latency |
-|-------|-----------|---------|
-| 0 | Heuristic (env exfil, infra commands) | ~0 ms |
-| 1 | LLM — conversation + project tree (Qwen3-30B via Nebius) | ~1–2 s |
-| 2 | Devil's advocate cross-check (uncertain BLOCKs only) | ~1–2 s |
-
-Decisions: `ALLOW` proceeds silently. `BLOCK` and `ESCALATE` surface a context box to the developer showing task context, proposed action, why it was flagged, and impact.
-
-Bypass for trusted sessions: set `BURTO_BYPASS=1` in the hook process environment.
+Dashboard: [http://localhost:8000](http://localhost:8000)
 
 ---
 
@@ -220,27 +92,31 @@ Bypass for trusted sessions: set `BURTO_BYPASS=1` in the hook process environmen
 
 ```
 burto/
-  hook_server.py      — FastAPI server, receives hook payloads
-  mcp_server.py       — MCP server (burto_start_task, status, clear)
-  evaluator.py        — heuristic + LLM evaluation pipeline
-  context_builder.py  — reads live transcript, scans project tree
-  prompts.py          — system prompts and JSON schemas
+  hook_server.py      — FastAPI server: PreToolUse, PostToolUse, Stop, SessionStart
+  evaluator.py        — heuristic + LLM evaluation pipeline, few-shot injection
+  hallucination.py    — file / package / flag hallucination detection
+  drift_monitor.py    — 4 drift rules with recovery-based suppression
+  drift_explainer.py  — Qwen3 LLM drift explanation generator
+  context_builder.py  — reads live transcript, scans project file tree
+  prompts.py          — system prompts and eval schemas
+  notifier.py         — desktop notify-send with click-to-approve
+  store.py            — SQLite: decisions, drift events, hallucinations, training_examples
   models.py           — Pydantic types
-  budget.py           — per-session action history
+  mcp_server.py       — MCP server (burto_start_task, burto_get_status, burto_clear_session)
+  templates/
+    base.html         — dashboard base layout
+    session.html      — per-session: stats, hallucination timeline, drift timeline, decision log
 
 .commandcode/
-  hooks/burto.sh      — cmdc PreToolUse hook (cmdc JSON output format)
+  hooks/burto.sh      — universal hook dispatcher (PreToolUse / PostToolUse / Stop / SessionStart)
 
-claude_code_hooks/
-  pretooluse.sh       — Claude Code PreToolUse hook
-
-test-codebase/        — isolated test project for cmdc integration tests
-  .commandcode/settings.json
-  .mcp.json
-  tests/hook_test.sh
+assets/
+  burto-flow.png      — architecture flow diagram
+  burto-flow.svg      — source SVG
 ```
 
+---
 
-## Output
+## Previous output
 
-![op](assets/op.png)
+![Dashboard output](assets/op.png)

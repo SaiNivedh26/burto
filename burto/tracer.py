@@ -383,7 +383,7 @@ def _log_on(parent: Span, intent: str, action: str, decision: str, reasoning: st
         while root.parent is not None:
             root = root.parent
         _safe(lambda: _ls_client().create_feedback(
-            uuid.UUID(root.id), key="decision", value=decision,
+            run_id=uuid.UUID(root.id), key="decision", value=decision,
             score=0.0 if decision == "BLOCK" else 1.0, comment=(reasoning or "")[:2000]))
     return d.id
 

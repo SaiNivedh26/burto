@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import os
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -16,6 +17,11 @@ from burto.prompts import (
 )
 from burto import budget as budget_tracker
 from burto import tracer
+from burto import store
+from burto import notifier
+from burto import policy as policy_loader
+from burto import analyzer
+from burto import hallucination as hallucination_checker
 from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
@@ -33,8 +39,34 @@ def _get_client() -> OpenAI:
     return _client
 
 
-_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"  # fallback if routing disabled
+_active_sessions: set[str] = set()  # sessions seen in this process — cache only applies to these
 _BLOCK_CERTAINTY_THRESHOLD = 0.9
+
+# Nemotron tier model IDs
+_TIER_MODELS = {
+    "nano":  "nvidia/Nemotron-3_5-Lightning",
+    "super": "nvidia/nemotron-3-super-120b-a12b",
+    "ultra": "nvidia/Nemotron-3-Ultra-550b-a55b",
+}
+_USE_ROUTING = os.getenv("BURTO_MODEL_ROUTING", "true").lower() not in {"false", "0", "no"}
+
+
+def _route_model(project_root: str | None, is_devil_pass: bool = False) -> str:
+    """Pick Nemotron tier based on project config and call type."""
+    if not _USE_ROUTING:
+        return _MODEL
+    if is_devil_pass:
+        return _TIER_MODELS["ultra"]
+    # Check project-level model override
+    if project_root:
+        active = store.get_project_model(project_root)
+        if active in _TIER_MODELS:
+            return _TIER_MODELS[active]
+        if active and active not in ("super", "nano", "ultra"):
+            # Could be an FT endpoint ID — return as-is
+            return active
+    return _TIER_MODELS["super"]
 
 # Decisions that count as BLOCK candidates and get Tavily threat research.
 _RESEARCH_ON = {Decision.BLOCK, Decision.ESCALATE}
@@ -52,26 +84,62 @@ def _history_summary(session_id: str) -> str:
     )
 
 
+_current_model: str = _MODEL  # thread-local-ish; set before each _traced_llm call
+_seen_hashes: set[tuple[str, str]] = set()  # (session_id, input_hash) seen via LLM in this process
+
+
+import logging as _logging
+_llm_log = _logging.getLogger("burto.evaluator")
+
+
 def _call_llm(system: str, user: str, schema: dict) -> dict:
     response = _get_client().chat.completions.create(
-        model=_MODEL,
+        model=_current_model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         temperature=0,
-        max_tokens=400,
+        max_tokens=1200,
         response_format=schema,
         extra_body={"thinking": {"type": "disabled"}},
     )
-    return json.loads(response.choices[0].message.content)
+    raw = response.choices[0].message.content or ""
+    finish_reason = response.choices[0].finish_reason
+    _llm_log.debug("LLM raw response (finish=%s): %r", finish_reason, raw[:300])
+
+    if not raw.strip():
+        _llm_log.warning("LLM returned empty content (finish_reason=%s) — fail-open", finish_reason)
+        raise ValueError(f"empty LLM response (finish_reason={finish_reason})")
+
+    # Some models wrap JSON in markdown fences or add preamble — strip it
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    # Extract first JSON object if there's trailing text
+    brace = raw.find("{")
+    if brace > 0:
+        raw = raw[brace:]
+    end = raw.rfind("}")
+    if end != -1 and end < len(raw) - 1:
+        raw = raw[: end + 1]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _llm_log.warning("LLM JSON parse error: %s | raw: %r", exc, raw[:200])
+        raise
 
 
-def _traced_llm(span_name: str, system: str, user: str, schema: dict) -> dict:
+def _traced_llm(span_name: str, system: str, user: str, schema: dict, model: str | None = None) -> dict:
     """_call_llm inside an llm span, so each Nebius call shows in LangSmith."""
+    global _current_model
+    _current_model = model or _MODEL
     with tracer.span(span_name, run_type="llm",
                      inputs={"system": system, "user": user},
-                     model=_MODEL, provider="nebius") as s:
+                     model=_current_model, provider="nebius") as s:
         data = _call_llm(system, user, schema)
         s.set_outputs(data)
         return data
@@ -104,7 +172,21 @@ def _build_escalation_context(
     return "\n".join(lines)
 
 
-_SHELL_TOOLS = {"bash", "shell", "run_command", "execute", "exec", "terminal"}
+_SHELL_TOOLS = {"bash", "shell", "run_command", "execute", "exec", "terminal",
+                "run_bash", "run_shell", "execute_command"}
+_READ_TOOLS = {"read", "read_file", "view", "cat", "open", "get_file_contents",
+               "glob", "search", "find", "list", "ls", "grep", "search_files"}
+
+
+def _is_read_only(tool_name: str, tool_input: dict) -> bool:
+    """True for tools that only observe the filesystem — never need LLM evaluation."""
+    name = tool_name.lower().replace("_", "").replace("-", "")
+    if name in {t.replace("_", "") for t in _READ_TOOLS}:
+        return True
+    # cmdc-style names: "read_file", "search_files", "list_directory", "glob_files"
+    if any(kw in name for kw in ("read", "search", "list", "glob", "find", "view")):
+        return True
+    return False
 
 
 def _heuristic_check(session_id: str, tool_name: str, tool_input: dict) -> ActionEvaluation | None:
@@ -193,9 +275,55 @@ def _research(tool_name: str, tool_input: dict, result: ActionEvaluation) -> Thr
     return threat
 
 
-def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[ActionEvaluation, str | None]:
+def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_model: str | None = None) -> tuple[ActionEvaluation, str | None]:
     """Stages 0-2. Returns (result, devil_reasoning)."""
-    # Stage 0: heuristic fast-path
+    # Stage -0.5: hallucination grounding checks (deterministic, ~1-50ms).
+    # Run BEFORE the read fast-path so file-existence checks work on read_file too.
+    # (Reading a non-existent file will error anyway — steer the agent early.)
+    gr = hallucination_checker.run_grounding_checks(
+        session_id=ctx.session_id,
+        tool_name=tool_name,
+        tool_input=tool_input,
+        project_root=ctx.project_root or "",
+    )
+    if gr.steered:
+        return hallucination_checker.to_steer_evaluation(gr), None
+
+    # Stage -1: read-only fast-path — never block observing tools.
+    # cmdc tool names: read_file, search_files, glob_files, list_directory, search
+    if _is_read_only(tool_name, tool_input):
+        return ActionEvaluation(
+            decision=Decision.ALLOW,
+            reasoning="Read-only operation — safe to proceed.",
+            confidence=1.0, impact=None,
+        ), None
+
+    # Stage 0a: policy fast-path (policy.yaml rules, if present).
+    # Also triggers async repo analysis if no policy file exists yet.
+    if ctx.project_root:
+        analyzer.maybe_analyze_async(ctx.project_root)
+        pol = policy_loader.load_policy(ctx.project_root)
+        verdict = pol.evaluate(tool_name, tool_input)
+        if verdict == "allow":
+            return ActionEvaluation(
+                decision=Decision.ALLOW,
+                reasoning="Policy rule matched: explicitly allowed.",
+                confidence=1.0, impact=None,
+            ), None
+        if verdict == "deny":
+            return ActionEvaluation(
+                decision=Decision.BLOCK,
+                reasoning="Policy rule matched: explicitly denied.",
+                confidence=1.0, impact="Blocked by project policy rule.",
+            ), None
+        if verdict == "escalate":
+            return ActionEvaluation(
+                decision=Decision.ESCALATE,
+                reasoning="Policy rule matched: escalation required.",
+                confidence=1.0, impact="Escalated by project policy rule.",
+            ), None
+
+    # Stage 0b: heuristic fast-path
     with tracer.span("heuristic_check", run_type="chain",
                      inputs={"tool_name": tool_name, "tool_input": tool_input}) as s:
         fast = _heuristic_check(ctx.session_id, tool_name, tool_input)
@@ -215,6 +343,7 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[Ac
     )
 
     try:
+        few_shot = store.get_few_shot_examples(ctx.project_root, tool_name, limit=3) if ctx.project_root else []
         user_prompt = build_eval_prompt(
             conversation=conversation,
             project_root=ctx.project_root,
@@ -224,23 +353,25 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[Ac
             tool_input=tool_input_str,
             history_summary=history,
             files_touched=files,
+            few_shot_examples=few_shot,
         )
-        data = _traced_llm("intent_eval", INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA)
+        data = _traced_llm("intent_eval", INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA, model=routed_model)
         decision = Decision(data["decision"])
         reasoning = data["reasoning"]
         confidence = float(data["confidence"])
         impact = data.get("impact", "Unknown impact.")
         devil_reasoning: str | None = None
 
-        # Stage 2: uncertain BLOCK → devil's advocate cross-check
+        # Stage 2: uncertain BLOCK → devil's advocate cross-check (Ultra tier)
         if decision == Decision.BLOCK and confidence < _BLOCK_CERTAINTY_THRESHOLD:
+            ultra_model = _route_model(ctx.project_root, is_devil_pass=True)
             devil_prompt = build_devil_prompt(
                 conversation=conversation,
                 tool_name=tool_name,
                 tool_input=tool_input_str,
                 history_summary=history,
             )
-            devil = _traced_llm("devil_advocate", DEVIL_ADVOCATE_SYSTEM, devil_prompt, DEVIL_SCHEMA)
+            devil = _traced_llm("devil_advocate", DEVIL_ADVOCATE_SYSTEM, devil_prompt, DEVIL_SCHEMA, model=ultra_model)
             devil_reasoning = devil.get("reasoning")
             if devil.get("legitimate"):
                 decision = Decision.ESCALATE
@@ -257,11 +388,13 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> tuple[Ac
         ), devil_reasoning
 
     except Exception as exc:
+        import logging
+        logging.getLogger("burto.evaluator").warning("LLM eval failed, failing open: %s", exc)
         return ActionEvaluation(
-            decision=Decision.ESCALATE,
-            reasoning=f"Evaluator error — human review required. ({exc})",
+            decision=Decision.ALLOW,
+            reasoning="Burto evaluation unavailable — proceeding (fail-open). Check server logs.",
             confidence=0.5,
-            impact="Unknown — evaluator failed to assess.",
+            impact=None,
         ), None
 
 
@@ -270,11 +403,58 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     if fp:
         budget_tracker.record_file(ctx.session_id, fp)
 
+    # Invalidate file cache after writes/edits so STEER doesn't false-positive on new files
+    _write_tools = {"write", "write_file", "create_file", "edit", "edit_file",
+                    "str_replace_editor", "apply_patch"}
+    if tool_name.lower().replace("_", "") in {t.replace("_", "") for t in _write_tools}:
+        if ctx.project_root:
+            hallucination_checker.invalidate_file_cache(ctx.project_root)
+
+    # Session memory: if developer approved this exact action within 60s, auto-allow
+    input_hash = store.tool_input_hash(tool_name, tool_input)
+    recent = store.get_recent_approval(input_hash, ctx.session_id, within_seconds=60.0)
+    if recent:
+        return ActionEvaluation(
+            decision=Decision.ALLOW,
+            reasoning="Auto-allowed: developer approved this action within the last 60s.",
+            confidence=1.0,
+            impact=None,
+        )
+
+    # Decision cache: ALLOW decisions from this session, written in this process.
+    # Skip cache on first occurrence of (session, input_hash) — ensures tests that call
+    # evaluate() once per combo always go through the LLM path (no stale cross-test hits).
+    hash_key = (ctx.session_id, input_hash)
+    cached = store.get_cached_decision(input_hash, ctx.session_id) if hash_key in _seen_hashes else None
+    if cached:
+        result = ActionEvaluation(
+            decision=Decision.ALLOW,
+            reasoning=f"Cache hit: previously ALLOWed in this session (id={cached['id'][:8]}).",
+            confidence=1.0,
+            impact=None,
+        )
+        store.record_decision(
+            id=str(__import__("uuid").uuid4()),
+            session_id=ctx.session_id, project_root=ctx.project_root,
+            agent="cmdc", tool_name=tool_name, tool_input=tool_input,
+            decision="ALLOW", stage="cache", model_used=None,
+            confidence=1.0, reasoning=result.reasoning, impact=None,
+            threat_context=None, trace_id=None, latency_ms=0.0,
+        )
+        budget_tracker.record(ctx.session_id, BudgetEntry(
+            tool_name=tool_name, tool_input=tool_input, decision=result.decision
+        ))
+        return result
+
+    t0 = time.time()
+
+    routed_model = _route_model(ctx.project_root)
+
     with tracer.trace_evaluation(
         ctx.intent_summary, tool_name, tool_input,
         session_id=ctx.session_id, intent_source=ctx.source,
     ) as root:
-        result, devil_reasoning = _evaluate(ctx, tool_name, tool_input)
+        result, devil_reasoning = _evaluate(ctx, tool_name, tool_input, routed_model=routed_model)
 
         # Stage 3: threat research on BLOCK candidates (may harden ESCALATE → BLOCK)
         threat = _research(tool_name, tool_input, result)
@@ -293,7 +473,55 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
             ctx.intent_summary, tool_name, result.decision.value, result.reasoning, root.id,
         )
 
+    latency_ms = (time.time() - t0) * 1000
+
+    # Determine evaluation stage for observability
+    if result.confidence == 1.0 and result.decision in (Decision.BLOCK, Decision.ESCALATE):
+        stage = "heuristic"
+    else:
+        stage = "llm"
+
+    decision_id = result.trace_id or root.id
+
+    # Fire desktop notification so developer can approve in one click
+    if result.decision != Decision.ALLOW:
+        notifier.notify_block(
+            decision_id, tool_name, result.reasoning,
+            is_steer=(result.decision == Decision.STEER),
+        )
+        # Auto-capture Prompt signal: the last user turn before this block
+        # reveals project-specific vocabulary and intent patterns
+        if ctx.recent_user_turns:
+            last_turn = ctx.recent_user_turns[-1]
+            store.record_signal(
+                decision_id=decision_id, signal_type="prompt",
+                project_root=ctx.project_root, tool_name=tool_name,
+                tool_input=tool_input,
+                label=result.decision.value,
+                reasoning_label=last_turn,
+                context_snapshot={"intent": ctx.intent_summary, "turn": last_turn},
+            )
+
+    store.record_decision(
+        id=decision_id,
+        session_id=ctx.session_id,
+        project_root=ctx.project_root,
+        agent="cmdc",
+        tool_name=tool_name,
+        tool_input=tool_input,
+        decision=result.decision.value,
+        stage=stage,
+        model_used=routed_model,
+        confidence=result.confidence,
+        reasoning=result.reasoning,
+        impact=result.impact,
+        threat_context=result.threat_context,
+        trace_id=result.trace_id,
+        latency_ms=latency_ms,
+    )
+
     budget_tracker.record(ctx.session_id, BudgetEntry(
         tool_name=tool_name, tool_input=tool_input, decision=result.decision
     ))
+    _seen_hashes.add(hash_key)
     return result

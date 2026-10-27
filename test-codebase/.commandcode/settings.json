@@ -2,12 +2,46 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "shell|write|edit|read",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
             "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh",
             "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/sai-nivedh-26/nvidia-hack/.commandcode/hooks/burto.sh",
+            "timeout": 10
           }
         ]
       }

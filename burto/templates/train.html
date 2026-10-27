@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}Fine-tune — {{ project.name or project.root }} — Burto{% endblock %}
+{% block content %}
+<a href="/projects/{{ project.root | urlencode }}" style="color: var(--muted); font-size: 13px;">← {{ project.name or 'Project' }}</a>
+<h1 style="margin-top: 8px;">Fine-tune Model</h1>
+<p class="subtitle">Train a dedicated Nemotron LoRA on {{ project.name or project.root }}'s labeled examples</p>
+
+{% set ready = ds.example_count >= 100 %}
+
+<div class="grid-4" style="margin-bottom: 20px;">
+  <div class="card stat">
+    <div class="stat-value" style="color: {% if ds.example_count >= 100 %}var(--green){% elif ds.example_count >= 10 %}var(--yellow){% else %}var(--red){% endif %}">{{ ds.example_count }}</div>
+    <div class="stat-label">Labeled Examples</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value">{{ ds.class_dist.get('ALLOW', 0) }}</div>
+    <div class="stat-label">ALLOW labels</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value">{{ ds.class_dist.get('BLOCK', 0) }}</div>
+    <div class="stat-label">BLOCK labels</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value">{{ ds.signal_mix.get('edit', 0) }}</div>
+    <div class="stat-label">Edit signals</div>
+  </div>
+</div>
+
+{% if ds.warnings %}
+<div class="card" style="border-color: var(--yellow);">
+  <div class="card-title" style="color: var(--yellow);">Warnings</div>
+  {% for w in ds.warnings %}
+    <p style="color: var(--yellow); font-size: 13px; margin-bottom: 6px;">⚠ {{ w }}</p>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-title">Stage 1 — Export Dataset</div>
+  <p style="color: var(--muted); font-size: 13px; margin-bottom: 16px;">
+    Formats all labeled examples as JSONL (SFT chat format) and pushes to Nebius Object Storage.
+    Edit signals get weight=2.0 — they're the most informative.
+  </p>
+  <form method="post" action="/projects/{{ project.root | urlencode }}/train/export" style="display: inline;">
+    <button type="submit" {% if ds.example_count < 1 %}disabled{% endif %} style="background: var(--accent); color: white; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;">
+      Export &amp; Push to Nebius DataLab
+    </button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="card-title">Stage 2 + 3 — Configure &amp; Submit Training Run</div>
+  <p style="color: var(--muted); font-size: 13px; margin-bottom: 16px;">
+    Submits a Token Factory SFT job with LoRA. Estimated cost:
+    <strong style="color: var(--text)">~${{ "%.4f" | format(ds.example_count * 500 * 3 * 0.30 / 1000000) }}</strong>
+    for {{ ds.example_count }} examples × 3 epochs on Nano.
+  </p>
+  <form method="post" action="/projects/{{ project.root | urlencode }}/train/submit" style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end;">
+    <div>
+      <label style="display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px;">Base Model</label>
+      <select name="base_model" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px;">
+        <option value="nvidia/Nemotron-3_5-Lightning">Nano — Lightning (fast, cost-effective)</option>
+        <option value="nvidia/nemotron-3-super-120b-a12b">Super — 120B (high quality)</option>
+      </select>
+    </div>
+    <div>
+      <label style="display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px;">Epochs</label>
+      <input type="number" name="epochs" value="3" min="1" max="10" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; width: 70px;">
+    </div>
+    <div>
+      <label style="display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px;">LoRA Rank</label>
+      <input type="number" name="lora_rank" value="16" min="4" max="64" style="background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 6px 10px; font-size: 13px; width: 70px;">
+    </div>
+    <button type="submit" {% if ds.example_count < 10 %}disabled{% endif %} style="background: {% if ds.example_count >= 10 %}#065f46{% else %}#374151{% endif %}; color: white; border: none; border-radius: 6px; padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;">
+      Submit to Token Factory
+    </button>
+  </form>
+</div>
+
+{% if runs %}
+<div class="card">
+  <div class="card-title">Training Runs</div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Run ID</th>
+        <th>Base Model</th>
+        <th>Status</th>
+        <th>Epochs</th>
+        <th>Tokens Used</th>
+        <th>Started</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td class="mono" style="font-size: 11px;">{{ r.id[:12] }}</td>
+        <td class="mono truncate" style="max-width: 200px;">{{ r.base_model }}</td>
+        <td>
+          <span class="badge" style="background: {% if r.status == 'deployed' %}#064e3b{% elif r.status in ('succeeded','completed') %}#0c4a6e{% elif r.status == 'failed' %}#450a0a{% else %}#1e293b{% endif %}; color: {% if r.status == 'deployed' %}var(--green){% elif r.status in ('succeeded','completed') %}#38bdf8{% elif r.status == 'failed' %}var(--red){% else %}var(--muted){% endif %};">{{ r.status }}</span>
+        </td>
+        <td>{{ r.epochs or '—' }}</td>
+        <td style="color: var(--muted)">{{ r.tokens_used or '—' }}</td>
+        <td style="color: var(--muted)">{% if r.started_at %}{{ r.started_at | int | ts }}{% else %}—{% endif %}</td>
+        <td>
+          {% if r.status in ('succeeded', 'completed') and r.status != 'deployed' %}
+            <form method="post" action="/projects/{{ project.root | urlencode }}/train/deploy/{{ r.id }}" style="display: inline;">
+              <button type="submit" style="background: var(--accent); color: white; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer;">Deploy</button>
+            </form>
+          {% elif r.status == 'deployed' %}
+            <span style="color: var(--green); font-size: 12px;">✓ Active</span>
+          {% elif r.status == 'queued' or r.status == 'running' %}
+            <a href="/projects/{{ project.root | urlencode }}/train/runs/{{ r.id }}" style="font-size: 12px;">Check status</a>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

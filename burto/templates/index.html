@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Sessions — Burto{% endblock %}
+{% block content %}
+<h1>Sessions</h1>
+<p class="subtitle">Recent coding agent sessions evaluated by Burto</p>
+
+{% if not sessions %}
+<div class="empty">No sessions yet. Start the burto server and run a coding agent.</div>
+{% else %}
+<div class="card">
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Session ID</th>
+        <th>Project</th>
+        <th>Agent</th>
+        <th>Actions</th>
+        <th>Blocked</th>
+        <th>Block Rate</th>
+        <th>Started</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for s in sessions %}
+      <tr>
+        <td><a href="/sessions/{{ s.id }}" class="mono">{{ s.id[:16] }}…</a></td>
+        <td class="truncate mono" title="{{ s.project_root }}">{{ s.project_root or '—' }}</td>
+        <td>{{ s.agent or '—' }}</td>
+        <td>{{ s.action_count }}</td>
+        <td>
+          {% if s.blocked_count > 0 %}
+            <span class="badge badge-block">{{ s.blocked_count }}</span>
+          {% else %}
+            <span style="color: var(--muted)">0</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if s.action_count > 0 %}
+            {% set rate = (s.blocked_count / s.action_count * 100) | round(0) | int %}
+            <span style="color: {% if rate > 30 %}var(--red){% elif rate > 10 %}var(--yellow){% else %}var(--green){% endif %}">
+              {{ rate }}%
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        <td style="color: var(--muted)">
+          {% if s.started_at %}
+            {{ s.started_at | int | ts }}
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

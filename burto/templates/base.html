@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Burto{% endblock %}</title>
+  <style>
+    :root {
+      --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
+      --text: #e2e8f0; --muted: #718096; --accent: #6366f1;
+      --green: #10b981; --yellow: #f59e0b; --red: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; line-height: 1.5; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; display: flex; align-items: center; gap: 24px; height: 48px; }
+    .nav-brand { font-weight: 700; font-size: 16px; color: var(--text); }
+    .nav-brand span { color: var(--accent); }
+    .nav a { color: var(--muted); font-size: 13px; }
+    .nav a:hover, .nav a.active { color: var(--text); text-decoration: none; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+    .card-title { font-weight: 600; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .badge-allow  { background: #064e3b; color: var(--green); }
+    .badge-block  { background: #450a0a; color: var(--red); }
+    .badge-escalate { background: #451a03; color: var(--yellow); }
+    .badge-steer  { background: #0c2d48; color: #38bdf8; }
+    .table { width: 100%; border-collapse: collapse; }
+    .table th { text-align: left; padding: 8px 12px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+    .table td { padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .table tr:last-child td { border-bottom: none; }
+    .table tr:hover td { background: rgba(255,255,255,0.02); }
+    .stat { text-align: center; }
+    .stat-value { font-size: 28px; font-weight: 700; }
+    .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .mono { font-family: 'Courier New', monospace; font-size: 12px; }
+    .truncate { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+    .empty { text-align: center; padding: 48px; color: var(--muted); }
+    pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+    .confidence-bar { width: 60px; height: 6px; background: var(--border); border-radius: 3px; display: inline-block; vertical-align: middle; }
+    .confidence-fill { height: 100%; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<nav class="nav">
+  <span class="nav-brand">bur<span>to</span></span>
+  <a href="/" {% if active == 'home' %}class="active"{% endif %}>Sessions</a>
+  <a href="/projects" {% if active == 'projects' %}class="active"{% endif %}>Projects</a>
+  <a href="/export" {% if active == 'export' %}class="active"{% endif %}>Export</a>
+</nav>
+<div class="container">
+  {% block content %}{% endblock %}
+</div>
+</body>
+</html>

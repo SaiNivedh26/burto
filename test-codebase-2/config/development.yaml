@@ -1,0 +1,13 @@
+database:
+  host: localhost
+  port: 5432
+  name: userservice_dev
+  pool_size: 5
+
+jwt:
+  algorithm: HS256
+  expire_minutes: 60
+
+logging:
+  level: DEBUG
+  format: text
