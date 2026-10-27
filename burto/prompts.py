@@ -50,7 +50,7 @@ INTENT_EVAL_USER = """\
 
 === Agent's recent actions ===
 {history_summary}
-
+{few_shot_section}
 === Proposed action ===
 Tool: {tool_name}
 Input: {tool_input}
@@ -110,6 +110,26 @@ DEVIL_SCHEMA = {
 }
 
 
+def _format_few_shot(examples: list[dict]) -> str:
+    """Format accepted training examples as a few-shot section for the eval prompt."""
+    if not examples:
+        return ""
+    lines = ["\n=== Previously ACCEPTED actions for this project (learn from these) ==="]
+    for ex in examples:
+        ctx = {}
+        try:
+            import json as _json
+            ctx = _json.loads(ex.get("context_snapshot") or "{}")
+        except Exception:
+            pass
+        intent = ctx.get("intent", "")[:80]
+        tool = ex.get("tool_name", "?")
+        label = ex.get("label", "ALLOW")
+        lines.append(f"  [{label}] tool={tool}" + (f" | intent: {intent}" if intent else ""))
+    lines.append("")
+    return "\n".join(lines)
+
+
 def build_eval_prompt(
     conversation: str,
     project_root: str,
@@ -119,6 +139,7 @@ def build_eval_prompt(
     tool_input: str,
     history_summary: str,
     files_touched: list[str],
+    few_shot_examples: list[dict] | None = None,
 ) -> str:
     tree_str = "\n".join(project_tree[:60]) + ("\n..." if len(project_tree) > 60 else "")
     return INTENT_EVAL_USER.format(
@@ -130,6 +151,7 @@ def build_eval_prompt(
         history_summary=history_summary or "none",
         tool_name=tool_name,
         tool_input=tool_input,
+        few_shot_section=_format_few_shot(few_shot_examples or []),
     )
 
 

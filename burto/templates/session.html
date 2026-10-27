@@ -5,7 +5,9 @@
 <h1 style="margin-top: 8px;">Session <span class="mono" style="font-size: 16px;">{{ session.id[:24] }}</span></h1>
 <p class="subtitle">{{ session.project_root or 'Unknown project' }} · {{ session.agent or 'unknown agent' }}</p>
 
-<div class="grid-4" style="margin-bottom: 20px;">
+{% set steer_count = decisions | selectattr('decision', 'equalto', 'STEER') | list | length %}
+{% set drift_count = drift_events | length %}
+<div class="grid-4" style="margin-bottom: 20px; grid-template-columns: repeat(5, 1fr);">
   <div class="card stat">
     <div class="stat-value">{{ session.action_count }}</div>
     <div class="stat-label">Total Actions</div>
@@ -19,11 +21,138 @@
     <div class="stat-label">Blocked</div>
   </div>
   <div class="card stat">
-    <div class="stat-value" style="color: var(--yellow)">{{ session.override_count }}</div>
-    <div class="stat-label">Overrides</div>
+    <div class="stat-value" style="color: #38bdf8">{{ steer_count }}</div>
+    <div class="stat-label">Steered (hallucinations)</div>
+  </div>
+  <div class="card stat">
+    <div class="stat-value" style="color: #fb923c">{{ drift_count }}</div>
+    <div class="stat-label">Drift Signals</div>
   </div>
 </div>
 
+{# ── Drift Timeline ──────────────────────────────────────────────── #}
+{% if drift_events %}
+<div class="card" style="margin-bottom: 20px;">
+  <div class="card-title" style="color: #fb923c;">⚡ Drift Timeline</div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Rule</th>
+        <th>Severity</th>
+        <th>Distance</th>
+        <th>Mode</th>
+        <th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for e in drift_events %}
+      <tr>
+        <td style="color: var(--muted); white-space: nowrap;">{{ e.ts | int | ts }}</td>
+        <td class="mono" style="font-size: 12px; color: #fb923c;">{{ e.rule }}</td>
+        <td>
+          {% if e.severity == 'steer' %}
+            <span class="badge" style="background:#3d1a00; color:#fb923c;">steer</span>
+          {% else %}
+            <span class="badge" style="background:#1a1a00; color:#fbbf24;">warn</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if e.goal_distance is not none %}
+            <span style="color: {% if e.goal_distance > 0.7 %}var(--red){% elif e.goal_distance > 0.4 %}var(--yellow){% else %}var(--green){% endif %}; font-size: 12px;">
+              {{ (e.goal_distance * 100) | round(0) | int }}%
+            </span>
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          {% if e.intervention == 'hard' %}
+            <span style="color: var(--red); font-size: 11px;">hard block</span>
+          {% else %}
+            <span style="color: var(--muted); font-size: 11px;">soft nudge</span>
+          {% endif %}
+        </td>
+        <td class="truncate" style="max-width: 320px; font-size: 12px; color: var(--muted);" title="{{ e.message }}">
+          {{ e.message[:100] if e.message else '—' }}{% if e.message and e.message | length > 100 %}…{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div style="padding: 10px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border);">
+    {{ drift_events | length }} drift signal(s) —
+    {{ drift_events | selectattr('severity', 'equalto', 'steer') | list | length }} hard steers,
+    {{ drift_events | selectattr('intervention', 'equalto', 'hard') | list | length }} stop blocks
+  </div>
+</div>
+{% endif %}
+
+{# ── Hallucination Timeline ──────────────────────────────────────── #}
+{% if hallucinations %}
+<div class="card" style="margin-bottom: 20px;">
+  <div class="card-title" style="color: #38bdf8;">🔍 Hallucination Timeline</div>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Type</th>
+        <th>Hallucinated</th>
+        <th>Correction</th>
+        <th>Outcome</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for h in hallucinations %}
+      <tr>
+        <td style="color: var(--muted); white-space: nowrap;">{{ h.ts | int | ts }}</td>
+        <td>
+          {% set htype = h.subtype or '' %}
+          {% if htype == 'file_not_found' %}
+            <span class="badge" style="background:#0c2d48; color:#38bdf8;">file</span>
+          {% elif htype == 'pkg_not_found' %}
+            <span class="badge" style="background:#1a0a2e; color:#a78bfa;">package</span>
+          {% elif htype == 'flag_not_found' %}
+            <span class="badge" style="background:#0a2818; color:#34d399;">flag</span>
+          {% elif htype == 'context_drift' %}
+            <span class="badge" style="background:#2d1b0e; color:#fb923c;">drift</span>
+          {% else %}
+            <span class="badge" style="background:#1a1a1a; color:#9ca3af;">{{ htype }}</span>
+          {% endif %}
+        </td>
+        <td class="mono truncate" style="color: var(--red); max-width: 180px;" title="{{ h.hallucinated_value }}">
+          {{ h.hallucinated_value[:50] if h.hallucinated_value else '—' }}
+        </td>
+        <td class="truncate" style="max-width: 280px; font-size: 12px; color: var(--muted);" title="{{ h.suggested_correction }}">
+          {% if h.suggested_value %}
+            <span class="mono" style="color: var(--green);">{{ h.suggested_value }}</span>
+            <span style="color: var(--muted); margin-left: 6px;">{{ h.suggested_correction[:80] if h.suggested_correction else '' }}</span>
+          {% else %}
+            {{ h.suggested_correction[:100] if h.suggested_correction else '—' }}
+          {% endif %}
+        </td>
+        <td>
+          {% set outcome = h.agent_outcome or 'pending' %}
+          {% if outcome == 'self_corrected' %}
+            <span style="color: var(--green); font-size: 12px;">✓ self-corrected</span>
+          {% elif outcome == 'ignored' %}
+            <span style="color: var(--red); font-size: 12px;">✗ ignored</span>
+          {% elif outcome == 'dev_overrode' %}
+            <span style="color: var(--yellow); font-size: 12px;">dev overrode</span>
+          {% else %}
+            <span style="color: var(--muted); font-size: 12px;">pending</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div style="padding: 10px 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border);">
+    {{ hallucinations | length }} hallucination(s) caught in this session —
+    {{ hallucinations | selectattr('agent_outcome', 'equalto', 'self_corrected') | list | length }} self-corrected
+  </div>
+</div>
+{% endif %}
+
+{# ── Decision Log ────────────────────────────────────────────────── #}
 {% if not decisions %}
 <div class="empty">No decisions recorded for this session.</div>
 {% else %}

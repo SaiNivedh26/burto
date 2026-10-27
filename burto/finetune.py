@@ -1,14 +1,13 @@
 """
-Nebius fine-tune pipeline for burto — Phase 2D.
+Nebius Token Factory fine-tune pipeline for burto.
 
 Four stages, all driven from the dashboard:
-  1. Build + push JSONL dataset to Nebius DataLab (S3-compatible)
-  2. Configure LoRA SFT run
-  3. Submit Token Factory job + poll for completion
-  4. Deploy LoRA adapter to Serverless Endpoint
+  1. Export labeled decisions as JSONL
+  2. Upload dataset via files.create() (OpenAI-compatible)
+  3. Submit LoRA SFT job via fine_tuning.jobs.create()
+  4. Poll for completion + record checkpoint/model ID
 
-Uses the Nebius SDK (nebius-sdk) or falls back to raw HTTPS when absent.
-Each stage writes to the ft_runs / datasets SQLite tables via store.py.
+Uses https://api.tokenfactory.nebius.com/v1/ (not api.studio.nebius.com).
 """
 from __future__ import annotations
 
@@ -27,23 +26,17 @@ try:
 except ImportError:
     pass
 
-try:
-    import boto3  # type: ignore[import-untyped]
-    _HAS_BOTO = True
-except ImportError:
-    _HAS_BOTO = False
-
 log = logging.getLogger("burto.finetune")
 
-# Nebius Object Storage endpoint (S3-compatible)
-_NEBIUS_S3_ENDPOINT = "https://storage.eu-north1.nebius.cloud"
-_NEBIUS_S3_BUCKET   = os.getenv("BURTO_NEBIUS_BUCKET", "burto-datasets")
-# Nebius Token Factory API
-_NEBIUS_TF_BASE     = "https://api.studio.nebius.com/v1"
+_TF_BASE_URL        = "https://api.tokenfactory.nebius.com/v1/"
+_TF_CONTROL_PLANE   = "https://api.tokenfactory.nebius.com"
+_TF_INFERENCE_URL   = "https://api.tokenfactory.nebius.com/v1"   # or regional: us-central1 / eu-north1
+# Cheapest model that supports LoRA fine-tuning + dedicated endpoint deployment
+_DEFAULT_FT_MODEL   = "meta-llama/Llama-3.2-1B-Instruct"
 
-_MIN_EXAMPLES  = 100   # warn if below; 1000 is the CTA threshold
-_MIN_EDIT_PCT  = 0.10  # at least 10% edit signals
-_MIN_PER_CLASS = 0.10  # at least 10% of each decision class
+_MIN_EXAMPLES  = 10    # Token Factory minimum (practical floor for a test)
+_MIN_EDIT_PCT  = 0.10  # recommend 10% edit signals
+_MIN_PER_CLASS = 0.10  # recommend 10% per decision class
 
 
 @dataclass
@@ -53,8 +46,7 @@ class DatasetSummary:
     example_count: int
     class_dist: dict[str, int]
     signal_mix: dict[str, int]
-    nebius_dataset_id: str | None = None
-    nebius_storage_uri: str | None = None
+    nebius_file_id: str | None = None   # file ID from client.files.create()
     version_label: str | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -63,11 +55,11 @@ class DatasetSummary:
 class TrainConfig:
     project_root: str
     dataset_id: str
-    base_model: str = "nvidia/Nemotron-3_5-Lightning"
-    lora_rank: int = 16
-    lora_alpha: float = 32.0
-    epochs: int = 3
-    lr: float = 2e-4
+    base_model: str = _DEFAULT_FT_MODEL
+    lora_rank: int = 8
+    lora_alpha: float = 8.0
+    epochs: int = 1
+    lr: float = 1e-4
     batch_size: int = 4
     val_split: float = 0.10
     estimated_cost_usd: float | None = None
@@ -76,14 +68,22 @@ class TrainConfig:
 @dataclass
 class FtRunStatus:
     run_id: str
-    status: str          # queued | running | completed | failed | cancelled
+    status: str          # queued | running | validating_files | succeeded | failed | cancelled
     nebius_job_id: str | None = None
     loss_curve: list[float] = field(default_factory=list)
     tokens_used: int = 0
     cost_usd: float = 0.0
-    endpoint_id: str | None = None
-    endpoint_url: str | None = None
+    ft_model_id: str | None = None   # fine_tuned_model_checkpoint from last checkpoint
     error: str | None = None
+
+
+def _get_client():
+    """OpenAI-compatible client pointed at Token Factory."""
+    from openai import OpenAI
+    api_key = os.getenv("nebius_api_key") or os.getenv("NEBIUS_API_KEY")
+    if not api_key:
+        raise RuntimeError("nebius_api_key not set")
+    return OpenAI(base_url=_TF_BASE_URL, api_key=api_key)
 
 
 def build_dataset(project_root: str) -> DatasetSummary:
@@ -101,18 +101,17 @@ def build_dataset(project_root: str) -> DatasetSummary:
     warnings: list[str] = []
     total = len(labeled)
     if total < _MIN_EXAMPLES:
-        warnings.append(f"Only {total} labeled examples — recommend ≥{_MIN_EXAMPLES} for meaningful fine-tuning.")
+        warnings.append(f"Only {total} labeled examples — need ≥{_MIN_EXAMPLES}.")
     edit_pct = signal_mix.get("edit", 0) / max(total, 1)
     if edit_pct < _MIN_EDIT_PCT:
-        warnings.append(f"Edit signals: {edit_pct:.0%} — recommend ≥10% (highest-signal type).")
+        warnings.append(f"Edit signals: {edit_pct:.0%} — recommend ≥10%.")
     for cls in ("ALLOW", "BLOCK", "ESCALATE"):
         pct = class_dist.get(cls, 0) / max(total, 1)
         if pct < _MIN_PER_CLASS:
-            warnings.append(f"Class {cls}: only {pct:.0%} of examples — imbalanced training data.")
+            warnings.append(f"Class {cls}: only {pct:.0%} — imbalanced.")
 
-    ds_id = str(uuid.uuid4())
     return DatasetSummary(
-        id=ds_id,
+        id=str(uuid.uuid4()),
         project_root=project_root,
         example_count=total,
         class_dist=class_dist,
@@ -151,17 +150,15 @@ def _format_example(ex: dict) -> dict:
         "impact": "See reasoning.",
     })
 
-    weight = 2.0 if ex.get("signal_type") == "edit" else 1.0
     return {
         "messages": [
-            {"role": "system", "content": INTENT_EVAL_SYSTEM},
-            {"role": "user",   "content": user_content},
+            {"role": "system",    "content": INTENT_EVAL_SYSTEM},
+            {"role": "user",      "content": user_content},
             {"role": "assistant", "content": assistant_content},
         ],
         "metadata": {
             "signal_type": ex.get("signal_type"),
             "project_root": ex.get("project_root"),
-            "weight": weight,
         },
     }
 
@@ -189,33 +186,15 @@ def export_jsonl(project_root: str, output_path: str | None = None) -> tuple[str
 
 
 def push_to_nebius(project_root: str, jsonl_path: str, ds_summary: DatasetSummary) -> DatasetSummary:
-    """Upload JSONL to Nebius Object Storage and register as a dataset."""
-    if not _HAS_BOTO:
-        raise RuntimeError("boto3 not installed — run: pip install boto3")
+    """Upload JSONL to Token Factory via files.create() and persist the file ID."""
+    client = _get_client()
+    with open(jsonl_path, "rb") as f:
+        upload = client.files.create(file=f, purpose="fine-tune")
 
-    access_key = os.getenv("nebius_access_key_id") or os.getenv("AWS_ACCESS_KEY_ID")
-    secret_key = os.getenv("nebius_secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY")
-    if not access_key or not secret_key:
-        raise RuntimeError(
-            "Set nebius_access_key_id + nebius_secret_access_key env vars for Nebius Object Storage."
-        )
-
-    s3 = boto3.client(
-        "s3",
-        endpoint_url=_NEBIUS_S3_ENDPOINT,
-        aws_access_key_id=access_key,
-        aws_secret_access_key=secret_key,
-    )
-    key = f"burto/{project_root.lstrip('/')}/{ds_summary.id}/train.jsonl"
-    s3.upload_file(jsonl_path, _NEBIUS_S3_BUCKET, key)
-    storage_uri = f"s3://{_NEBIUS_S3_BUCKET}/{key}"
-    log.info("uploaded dataset to %s", storage_uri)
-
-    ds_summary.nebius_storage_uri = storage_uri
-    ds_summary.nebius_dataset_id = ds_summary.id  # use our id as the registration id
+    log.info("uploaded dataset: file_id=%s bytes=%d", upload.id, upload.bytes)
+    ds_summary.nebius_file_id = upload.id
     ds_summary.version_label = f"v{int(time.time())}"
 
-    # Persist to SQLite
     from burto import store as _store
     _store._enqueue(
         """INSERT OR REPLACE INTO datasets
@@ -225,44 +204,40 @@ def push_to_nebius(project_root: str, jsonl_path: str, ds_summary: DatasetSummar
            VALUES (?,?,?,?,?,?,?,?,?)""",
         (ds_summary.id, project_root, time.time(), ds_summary.example_count,
          json.dumps(ds_summary.class_dist), json.dumps(ds_summary.signal_mix),
-         ds_summary.nebius_dataset_id, storage_uri, ds_summary.version_label),
+         upload.id, None, ds_summary.version_label),
     )
     return ds_summary
 
 
 def estimate_cost(config: TrainConfig, example_count: int) -> float:
-    """Rough cost estimate (USD) for Token Factory SFT job."""
-    # ~500 tokens per example, 3 epochs, Nano ~$0.30 per 1M tokens
-    tokens = example_count * 500 * config.epochs
-    cost_per_m = 0.30 if "Nano" in config.base_model or "Lightning" in config.base_model else 1.20
-    return round(tokens * cost_per_m / 1_000_000, 4)
+    """Rough cost estimate (USD) for a LoRA SFT job."""
+    avg_tokens = 600
+    tokens = example_count * avg_tokens * config.epochs
+    # Llama-3.2-1B LoRA is very cheap; ballpark $0.10 per 1M tokens
+    return round(tokens * 0.10 / 1_000_000, 4)
 
 
 def submit_sft_job(config: TrainConfig, ds: DatasetSummary) -> FtRunStatus:
-    """Submit a Token Factory SFT job and write an ft_runs row."""
-    import requests
+    """Submit a LoRA SFT job to Token Factory and write an ft_runs row."""
+    if not ds.nebius_file_id:
+        raise RuntimeError("dataset not yet uploaded — call push_to_nebius() first")
 
-    api_key = os.getenv("nebius_api_key")
-    if not api_key:
-        raise RuntimeError("nebius_api_key not set")
-
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "model": config.base_model,
-        "training_file": ds.nebius_storage_uri,
-        "hyperparameters": {
+    client = _get_client()
+    job = client.fine_tuning.jobs.create(
+        model=config.base_model,
+        training_file=ds.nebius_file_id,
+        suffix=f"burto-{Path(config.project_root).name[:16]}",
+        hyperparameters={
             "n_epochs": config.epochs,
-            "learning_rate_multiplier": config.lr,
             "batch_size": config.batch_size,
+            "learning_rate_multiplier": config.lr,
+            "lora": True,
+            "lora_r": config.lora_rank,
+            "lora_alpha": int(config.lora_alpha),
+            "lora_dropout": 0.05,
+            "packing": True,
         },
-        "suffix": f"burto-{Path(config.project_root).name[:16]}",
-    }
-    # Token Factory fine-tune endpoint
-    url = f"{_NEBIUS_TF_BASE}/fine_tuning/jobs"
-    resp = requests.post(url, headers=headers, json=body, timeout=30)
-    resp.raise_for_status()
-    job_data = resp.json()
-    job_id = job_data.get("id") or job_data.get("job_id")
+    )
 
     run_id = str(uuid.uuid4())
     from burto import store as _store
@@ -273,16 +248,14 @@ def submit_sft_job(config: TrainConfig, ds: DatasetSummary) -> FtRunStatus:
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (run_id, config.project_root, config.dataset_id, time.time(),
          config.base_model, config.lora_rank, config.lora_alpha,
-         config.epochs, config.lr, config.batch_size, "queued", job_id),
+         config.epochs, config.lr, config.batch_size, "queued", job.id),
     )
-    log.info("submitted SFT job %s → run %s", job_id, run_id)
-    return FtRunStatus(run_id=run_id, status="queued", nebius_job_id=job_id)
+    log.info("submitted SFT job %s → run %s", job.id, run_id)
+    return FtRunStatus(run_id=run_id, status="queued", nebius_job_id=job.id)
 
 
 def poll_job(run_id: str) -> FtRunStatus:
     """Poll Token Factory job status and update ft_runs table."""
-    import requests
-
     from burto import store as _store
     with _store._read_conn() as conn:
         row = conn.execute("SELECT * FROM ft_runs WHERE id=?", (run_id,)).fetchone()
@@ -294,33 +267,72 @@ def poll_job(run_id: str) -> FtRunStatus:
     if not job_id:
         return FtRunStatus(run_id=run_id, status=row.get("status", "unknown"))
 
-    api_key = os.getenv("nebius_api_key")
-    headers = {"Authorization": f"Bearer {api_key}"}
-    url = f"{_NEBIUS_TF_BASE}/fine_tuning/jobs/{job_id}"
+    client = _get_client()
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        job = client.fine_tuning.jobs.retrieve(job_id)
     except Exception as e:
         return FtRunStatus(run_id=run_id, status=row.get("status", "unknown"), error=str(e))
 
-    status = data.get("status", "unknown")
+    status = job.status
+    trained_tokens = getattr(job, "trained_tokens", 0) or 0
+
     _store._enqueue(
         "UPDATE ft_runs SET status=?, tokens_used=?, finished_at=? WHERE id=?",
-        (status, data.get("trained_tokens", 0),
+        (status, trained_tokens,
          time.time() if status in ("succeeded", "failed") else None, run_id),
     )
+
+    # If succeeded, grab the last checkpoint's fine_tuned_model_checkpoint
+    ft_model_id: str | None = None
+    if status == "succeeded":
+        try:
+            ckpts = client.fine_tuning.jobs.checkpoints.list(job_id)
+            if ckpts.data:
+                ft_model_id = ckpts.data[-1].fine_tuned_model_checkpoint
+                _store._enqueue(
+                    "UPDATE ft_runs SET endpoint_id=? WHERE id=?",
+                    (ft_model_id, run_id),
+                )
+        except Exception:
+            pass
+
     return FtRunStatus(
         run_id=run_id, status=status, nebius_job_id=job_id,
-        tokens_used=data.get("trained_tokens", 0),
+        tokens_used=trained_tokens, ft_model_id=ft_model_id,
     )
 
 
-def deploy_endpoint(run_id: str) -> FtRunStatus:
-    """Deploy fine-tuned model to a Nebius Serverless Endpoint."""
+def list_endpoint_templates(region: str = "eu-north1") -> list[dict]:
+    """List available dedicated endpoint model templates (GPU configs)."""
     import requests
+    api_key = os.getenv("nebius_api_key") or os.getenv("NEBIUS_API_KEY")
+    r = requests.get(
+        f"{_TF_CONTROL_PLANE}/v0/dedicated_endpoints/templates",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=15,
+    )
+    r.raise_for_status()
+    templates = r.json().get("templates") or r.json().get("items") or r.json()
+    if isinstance(templates, list):
+        return [t for t in templates if region in str(t.get("region", ""))]
+    return []
 
+
+def deploy_endpoint(run_id: str, region: str = "eu-north1") -> FtRunStatus:
+    """
+    Create a Dedicated Endpoint for the fine-tuned model on Token Factory.
+
+    Calls POST /v0/dedicated_endpoints (control plane) which returns an
+    endpoint_id + routing_key.  The routing_key is then used as `model=`
+    in inference calls to _TF_INFERENCE_URL.
+
+    Custom weights (LoRA) are in beta — if the API rejects the fine-tuned
+    model_name, the function falls back to recording the checkpoint ID only
+    and returns status='checkpoint_ready' so the dashboard can show it.
+    """
+    import requests
     from burto import store as _store
+
     with _store._read_conn() as conn:
         row = conn.execute("SELECT * FROM ft_runs WHERE id=?", (run_id,)).fetchone()
     if not row:
@@ -331,26 +343,80 @@ def deploy_endpoint(run_id: str) -> FtRunStatus:
         return FtRunStatus(run_id=run_id, status=row["status"],
                            error="job not yet completed")
 
-    api_key = os.getenv("nebius_api_key")
-    if not api_key:
-        raise RuntimeError("nebius_api_key not set")
+    # Resolve the fine-tuned checkpoint model name
+    ft_model_id = row.get("endpoint_id")
+    if not ft_model_id:
+        client = _get_client()
+        job_id = row.get("nebius_job_id", "")
+        try:
+            ckpts = client.fine_tuning.jobs.checkpoints.list(job_id)
+            if ckpts.data:
+                ft_model_id = ckpts.data[-1].fine_tuned_model_checkpoint
+        except Exception as e:
+            return FtRunStatus(run_id=run_id, status="failed", error=str(e))
 
-    # Use the fine-tuned model with its job ID as the model identifier
-    ft_model_id = f"ft:{row['nebius_job_id']}"
-    endpoint_url = f"{_NEBIUS_TF_BASE}"  # hosted model served via same API
+    if not ft_model_id:
+        return FtRunStatus(run_id=run_id, status="failed", error="no checkpoint found")
 
-    _store._enqueue(
-        "UPDATE ft_runs SET endpoint_id=?, endpoint_url=?, status='deployed' WHERE id=?",
-        (ft_model_id, endpoint_url, run_id),
-    )
-    _store._enqueue(
-        "UPDATE projects SET ft_model_id=?, active_model=? WHERE root=?",
-        (ft_model_id, ft_model_id, row["project_root"]),
-    )
-    log.info("deployed fine-tuned model %s for project %s", ft_model_id, row["project_root"])
-    return FtRunStatus(
-        run_id=run_id, status="deployed",
-        nebius_job_id=row["nebius_job_id"],
-        endpoint_id=ft_model_id,
-        endpoint_url=endpoint_url,
-    )
+    api_key = os.getenv("nebius_api_key") or os.getenv("NEBIUS_API_KEY")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    # First, discover a valid template for the base model
+    base_model = row.get("base_model", _DEFAULT_FT_MODEL)
+    # Token Factory template model_name uses / not : — strip checkpoint suffix
+    template_model = base_model.split(":")[0]
+
+    payload = {
+        "name": f"burto-{Path(row['project_root']).name[:20]}-{run_id[:8]}",
+        "description": f"Burto fine-tuned model for {row['project_root']}",
+        "model_name": ft_model_id,          # fine-tuned checkpoint ID
+        "flavor_name": "base",
+        "gpu_type": "gpu-h100-sxm",
+        "gpu_count": 1,
+        "region": region,
+        "scaling": {"min_replicas": 1, "max_replicas": 1},
+    }
+
+    try:
+        r = requests.post(
+            f"{_TF_CONTROL_PLANE}/v0/dedicated_endpoints",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        endpoint_id  = data.get("id") or data.get("endpoint_id")
+        routing_key  = data.get("routing_key") or ft_model_id
+        endpoint_url = f"{_TF_INFERENCE_URL}"
+
+        _store._enqueue(
+            "UPDATE ft_runs SET endpoint_id=?, endpoint_url=?, status='deployed' WHERE id=?",
+            (routing_key, endpoint_url, run_id),
+        )
+        _store._enqueue(
+            "UPDATE projects SET ft_model_id=?, active_model=? WHERE root=?",
+            (routing_key, routing_key, row["project_root"]),
+        )
+        log.info("dedicated endpoint created: id=%s routing_key=%s", endpoint_id, routing_key)
+        return FtRunStatus(
+            run_id=run_id, status="deployed",
+            nebius_job_id=row["nebius_job_id"],
+            ft_model_id=routing_key,
+        )
+
+    except requests.HTTPError as exc:
+        # Custom weights are in beta — may be rejected for non-whitelisted accounts
+        err_body = exc.response.text if exc.response is not None else str(exc)
+        log.warning("dedicated endpoint creation failed (custom weights beta?): %s", err_body)
+        # Fall back: record checkpoint as-is, usable once account is whitelisted
+        _store._enqueue(
+            "UPDATE ft_runs SET endpoint_id=?, status='checkpoint_ready' WHERE id=?",
+            (ft_model_id, run_id),
+        )
+        return FtRunStatus(
+            run_id=run_id, status="checkpoint_ready",
+            nebius_job_id=row["nebius_job_id"],
+            ft_model_id=ft_model_id,
+            error=f"Dedicated endpoint beta — contact Nebius support to enable. Checkpoint: {ft_model_id}",
+        )

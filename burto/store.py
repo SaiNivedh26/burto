@@ -160,11 +160,43 @@ CREATE TABLE IF NOT EXISTS ft_runs (
     eval_metrics_json   TEXT
 );
 
+CREATE TABLE IF NOT EXISTS hallucinations (
+    id                  TEXT PRIMARY KEY,
+    decision_id         TEXT,
+    ts                  REAL NOT NULL,
+    session_id          TEXT NOT NULL,
+    project_root        TEXT,
+    subtype             TEXT,           -- file_not_found | pkg_not_found | flag_not_found | context_drift
+    check_name          TEXT,
+    hallucinated_value  TEXT,
+    suggested_correction TEXT,
+    suggested_value     TEXT,
+    agent_outcome       TEXT DEFAULT 'pending'  -- pending | self_corrected | ignored | dev_overrode
+);
+
+CREATE TABLE IF NOT EXISTS drift_events (
+    id              TEXT PRIMARY KEY,
+    ts              REAL NOT NULL,
+    session_id      TEXT NOT NULL,
+    project_root    TEXT,
+    rule            TEXT NOT NULL,     -- repetition_loop | failure_spiral | tool_cycling | rework_churn | goal_drift
+    severity        TEXT NOT NULL,     -- warn | steer
+    goal_distance   REAL,              -- 0=on-goal, 1=fully-off
+    message         TEXT,
+    details_json    TEXT,
+    intervention    TEXT DEFAULT 'soft'  -- soft (additionalContext) | hard (stop block)
+);
+
+CREATE INDEX IF NOT EXISTS drift_events_session ON drift_events(session_id);
+CREATE INDEX IF NOT EXISTS drift_events_ts ON drift_events(ts);
+
 CREATE INDEX IF NOT EXISTS decisions_session ON decisions(session_id);
 CREATE INDEX IF NOT EXISTS decisions_project ON decisions(project_root);
 CREATE INDEX IF NOT EXISTS decisions_ts ON decisions(ts);
 CREATE INDEX IF NOT EXISTS decisions_decision ON decisions(decision);
 CREATE INDEX IF NOT EXISTS training_examples_project ON training_examples(project_root);
+CREATE INDEX IF NOT EXISTS hallucinations_session ON hallucinations(session_id);
+CREATE INDEX IF NOT EXISTS hallucinations_project ON hallucinations(project_root);
 """
 
 
@@ -344,6 +376,91 @@ def record_signal(
         )
 
 
+def record_hallucination(
+    *,
+    decision_id: str,
+    session_id: str,
+    project_root: str | None,
+    subtype: str,
+    check_name: str,
+    hallucinated_value: str,
+    suggested_correction: str,
+    suggested_value: str,
+) -> str:
+    """Persist a hallucination event; returns its id."""
+    import uuid
+    hid = str(uuid.uuid4())
+    _enqueue(
+        """INSERT INTO hallucinations
+           (id, decision_id, ts, session_id, project_root,
+            subtype, check_name, hallucinated_value, suggested_correction, suggested_value)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (
+            hid, decision_id, time.time(), session_id, project_root,
+            subtype, check_name, hallucinated_value, suggested_correction, suggested_value,
+        ),
+    )
+    return hid
+
+
+def update_hallucination_outcome(hallucination_id: str, outcome: str) -> None:
+    """Set agent_outcome once we observe whether the agent self-corrected."""
+    _enqueue(
+        "UPDATE hallucinations SET agent_outcome=? WHERE id=?",
+        (outcome, hallucination_id),
+    )
+
+
+def record_drift_event(
+    *,
+    session_id: str,
+    project_root: str | None,
+    rule: str,
+    severity: str,
+    goal_distance: float,
+    message: str,
+    details: dict,
+    intervention: str = "soft",
+) -> str:
+    import uuid
+    eid = str(uuid.uuid4())
+    _enqueue(
+        """INSERT INTO drift_events
+           (id, ts, session_id, project_root, rule, severity, goal_distance, message, details_json, intervention)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (eid, time.time(), session_id, project_root, rule, severity, goal_distance,
+         message[:500], json.dumps(details), intervention),
+    )
+    return eid
+
+
+def get_drift_events_for_session(session_id: str) -> list[dict]:
+    with _read_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM drift_events WHERE session_id=? ORDER BY ts ASC",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_hallucinations_for_session(session_id: str) -> list[dict]:
+    with _read_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hallucinations WHERE session_id=? ORDER BY ts ASC",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_hallucinations_for_project(project_root: str, limit: int = 100) -> list[dict]:
+    with _read_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hallucinations WHERE project_root=? ORDER BY ts DESC LIMIT ?",
+            (project_root, limit),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Public read API (used by dashboard)
 # ---------------------------------------------------------------------------
@@ -427,6 +544,37 @@ def get_training_examples(project_root: str, limit: int = 1000) -> list[dict]:
             "SELECT * FROM training_examples WHERE project_root=? ORDER BY created_at DESC LIMIT ?",
             (project_root, limit),
         ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_few_shot_examples(
+    project_root: str,
+    tool_name: str | None = None,
+    limit: int = 3,
+) -> list[dict]:
+    """Return recent ACCEPT training_examples for few-shot injection into eval prompt.
+    Prioritizes same-tool examples; falls back to any ACCEPT for this project.
+    """
+    with _read_conn() as conn:
+        if tool_name:
+            rows = conn.execute(
+                """SELECT tool_name, context_snapshot, label, reasoning_label
+                   FROM training_examples
+                   WHERE project_root=? AND signal_type='accept'
+                   ORDER BY
+                     CASE WHEN tool_name=? THEN 0 ELSE 1 END,
+                     created_at DESC
+                   LIMIT ?""",
+                (project_root, tool_name, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT tool_name, context_snapshot, label, reasoning_label
+                   FROM training_examples
+                   WHERE project_root=? AND signal_type='accept'
+                   ORDER BY created_at DESC LIMIT ?""",
+                (project_root, limit),
+            ).fetchall()
         return [dict(r) for r in rows]
 
 

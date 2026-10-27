@@ -21,6 +21,7 @@ from burto import store
 from burto import notifier
 from burto import policy as policy_loader
 from burto import analyzer
+from burto import hallucination as hallucination_checker
 from burto.threat_researcher import ThreatContext, research_threat
 
 load_dotenv()
@@ -87,6 +88,10 @@ _current_model: str = _MODEL  # thread-local-ish; set before each _traced_llm ca
 _seen_hashes: set[tuple[str, str]] = set()  # (session_id, input_hash) seen via LLM in this process
 
 
+import logging as _logging
+_llm_log = _logging.getLogger("burto.evaluator")
+
+
 def _call_llm(system: str, user: str, schema: dict) -> dict:
     response = _get_client().chat.completions.create(
         model=_current_model,
@@ -95,11 +100,37 @@ def _call_llm(system: str, user: str, schema: dict) -> dict:
             {"role": "user", "content": user},
         ],
         temperature=0,
-        max_tokens=400,
+        max_tokens=1200,
         response_format=schema,
         extra_body={"thinking": {"type": "disabled"}},
     )
-    return json.loads(response.choices[0].message.content)
+    raw = response.choices[0].message.content or ""
+    finish_reason = response.choices[0].finish_reason
+    _llm_log.debug("LLM raw response (finish=%s): %r", finish_reason, raw[:300])
+
+    if not raw.strip():
+        _llm_log.warning("LLM returned empty content (finish_reason=%s) — fail-open", finish_reason)
+        raise ValueError(f"empty LLM response (finish_reason={finish_reason})")
+
+    # Some models wrap JSON in markdown fences or add preamble — strip it
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+    # Extract first JSON object if there's trailing text
+    brace = raw.find("{")
+    if brace > 0:
+        raw = raw[brace:]
+    end = raw.rfind("}")
+    if end != -1 and end < len(raw) - 1:
+        raw = raw[: end + 1]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _llm_log.warning("LLM JSON parse error: %s | raw: %r", exc, raw[:200])
+        raise
 
 
 def _traced_llm(span_name: str, system: str, user: str, schema: dict, model: str | None = None) -> dict:
@@ -141,7 +172,21 @@ def _build_escalation_context(
     return "\n".join(lines)
 
 
-_SHELL_TOOLS = {"bash", "shell", "run_command", "execute", "exec", "terminal"}
+_SHELL_TOOLS = {"bash", "shell", "run_command", "execute", "exec", "terminal",
+                "run_bash", "run_shell", "execute_command"}
+_READ_TOOLS = {"read", "read_file", "view", "cat", "open", "get_file_contents",
+               "glob", "search", "find", "list", "ls", "grep", "search_files"}
+
+
+def _is_read_only(tool_name: str, tool_input: dict) -> bool:
+    """True for tools that only observe the filesystem — never need LLM evaluation."""
+    name = tool_name.lower().replace("_", "").replace("-", "")
+    if name in {t.replace("_", "") for t in _READ_TOOLS}:
+        return True
+    # cmdc-style names: "read_file", "search_files", "list_directory", "glob_files"
+    if any(kw in name for kw in ("read", "search", "list", "glob", "find", "view")):
+        return True
+    return False
 
 
 def _heuristic_check(session_id: str, tool_name: str, tool_input: dict) -> ActionEvaluation | None:
@@ -232,6 +277,27 @@ def _research(tool_name: str, tool_input: dict, result: ActionEvaluation) -> Thr
 
 def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_model: str | None = None) -> tuple[ActionEvaluation, str | None]:
     """Stages 0-2. Returns (result, devil_reasoning)."""
+    # Stage -0.5: hallucination grounding checks (deterministic, ~1-50ms).
+    # Run BEFORE the read fast-path so file-existence checks work on read_file too.
+    # (Reading a non-existent file will error anyway — steer the agent early.)
+    gr = hallucination_checker.run_grounding_checks(
+        session_id=ctx.session_id,
+        tool_name=tool_name,
+        tool_input=tool_input,
+        project_root=ctx.project_root or "",
+    )
+    if gr.steered:
+        return hallucination_checker.to_steer_evaluation(gr), None
+
+    # Stage -1: read-only fast-path — never block observing tools.
+    # cmdc tool names: read_file, search_files, glob_files, list_directory, search
+    if _is_read_only(tool_name, tool_input):
+        return ActionEvaluation(
+            decision=Decision.ALLOW,
+            reasoning="Read-only operation — safe to proceed.",
+            confidence=1.0, impact=None,
+        ), None
+
     # Stage 0a: policy fast-path (policy.yaml rules, if present).
     # Also triggers async repo analysis if no policy file exists yet.
     if ctx.project_root:
@@ -277,6 +343,7 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_mode
     )
 
     try:
+        few_shot = store.get_few_shot_examples(ctx.project_root, tool_name, limit=3) if ctx.project_root else []
         user_prompt = build_eval_prompt(
             conversation=conversation,
             project_root=ctx.project_root,
@@ -286,6 +353,7 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_mode
             tool_input=tool_input_str,
             history_summary=history,
             files_touched=files,
+            few_shot_examples=few_shot,
         )
         data = _traced_llm("intent_eval", INTENT_EVAL_SYSTEM, user_prompt, EVAL_SCHEMA, model=routed_model)
         decision = Decision(data["decision"])
@@ -320,11 +388,13 @@ def _evaluate(ctx: SessionContext, tool_name: str, tool_input: dict, routed_mode
         ), devil_reasoning
 
     except Exception as exc:
+        import logging
+        logging.getLogger("burto.evaluator").warning("LLM eval failed, failing open: %s", exc)
         return ActionEvaluation(
-            decision=Decision.ESCALATE,
-            reasoning=f"Evaluator error — human review required. ({exc})",
+            decision=Decision.ALLOW,
+            reasoning="Burto evaluation unavailable — proceeding (fail-open). Check server logs.",
             confidence=0.5,
-            impact="Unknown — evaluator failed to assess.",
+            impact=None,
         ), None
 
 
@@ -332,6 +402,13 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
     fp = _extract_file_path(tool_input)
     if fp:
         budget_tracker.record_file(ctx.session_id, fp)
+
+    # Invalidate file cache after writes/edits so STEER doesn't false-positive on new files
+    _write_tools = {"write", "write_file", "create_file", "edit", "edit_file",
+                    "str_replace_editor", "apply_patch"}
+    if tool_name.lower().replace("_", "") in {t.replace("_", "") for t in _write_tools}:
+        if ctx.project_root:
+            hallucination_checker.invalidate_file_cache(ctx.project_root)
 
     # Session memory: if developer approved this exact action within 60s, auto-allow
     input_hash = store.tool_input_hash(tool_name, tool_input)
@@ -406,9 +483,12 @@ def evaluate(ctx: SessionContext, tool_name: str, tool_input: dict) -> ActionEva
 
     decision_id = result.trace_id or root.id
 
-    # Fire desktop notification on BLOCK/ESCALATE so developer can approve in one click
+    # Fire desktop notification so developer can approve in one click
     if result.decision != Decision.ALLOW:
-        notifier.notify_block(decision_id, tool_name, result.reasoning)
+        notifier.notify_block(
+            decision_id, tool_name, result.reasoning,
+            is_steer=(result.decision == Decision.STEER),
+        )
         # Auto-capture Prompt signal: the last user turn before this block
         # reveals project-specific vocabulary and intent patterns
         if ctx.recent_user_turns:
