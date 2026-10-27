@@ -1,0 +1,191 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 900" width="1160" height="900" font-family="ui-monospace,SFMono-Regular,Menlo,monospace">
+  <rect width="1160" height="900" fill="#f8fafc"/>
+
+  <!-- Title -->
+  <text x="580" y="36" text-anchor="middle" font-size="22" font-weight="700" fill="#1e1e1e">Burto — Hallucination Interceptor &amp; Drift Driver</text>
+
+  <!-- ── LAYER 0: Agent Layer ─────────────────────────────────── -->
+  <rect x="10" y="55" width="1140" height="100" rx="10" fill="#dbe4ff" stroke="#4a9eed" stroke-width="1" opacity="0.6"/>
+  <text x="20" y="72" font-size="12" fill="#2563eb" font-weight="600">Coding Agent Layer</text>
+
+  <!-- Agent box -->
+  <rect x="30" y="80" width="150" height="60" rx="8" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/>
+  <text x="105" y="106" text-anchor="middle" font-size="14" font-weight="600" fill="#1e3a5f">Claude Code</text>
+  <text x="105" y="124" text-anchor="middle" font-size="13" fill="#1e3a5f">/ OpenCode</text>
+
+  <line x1="180" y1="110" x2="270" y2="110" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="225" y="105" text-anchor="middle" font-size="11" fill="#374151">tool call</text>
+
+  <!-- Hook script box -->
+  <rect x="270" y="80" width="150" height="60" rx="8" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="345" y="106" text-anchor="middle" font-size="14" font-weight="600" fill="#3b0764">burto.sh</text>
+  <text x="345" y="124" text-anchor="middle" font-size="13" fill="#3b0764">hook script</text>
+
+  <line x1="420" y1="110" x2="510" y2="110" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="465" y="105" text-anchor="middle" font-size="11" fill="#374151">stdin JSON</text>
+
+  <!-- Server box -->
+  <rect x="510" y="80" width="190" height="60" rx="8" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="605" y="106" text-anchor="middle" font-size="14" font-weight="600" fill="#3b0764">Burto Hook Server</text>
+  <text x="605" y="124" text-anchor="middle" font-size="13" fill="#3b0764">FastAPI :8000</text>
+
+  <!-- PostToolUse dashed line (left column) -->
+  <line x1="105" y1="140" x2="105" y2="820" stroke="#f59e0b" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="40" y="780" font-size="11" fill="#92400e" transform="rotate(-90,40,780)">PostToolUse response</text>
+
+  <!-- ── LAYER 1: Heuristic ───────────────────────────────────── -->
+  <rect x="10" y="175" width="1140" height="100" rx="10" fill="#fff3bf" stroke="#f59e0b" stroke-width="1" opacity="0.6"/>
+  <text x="20" y="192" font-size="12" fill="#92400e" font-weight="600">Stage 0 — Heuristic Fast Rail  (0 ms, no LLM)</text>
+
+  <line x1="605" y1="140" x2="605" y2="195" stroke="#8b5cf6" stroke-width="2" marker-end="url(#arr)"/>
+
+  <rect x="400" y="198" width="260" height="52" rx="8" fill="#fff3bf" stroke="#f59e0b" stroke-width="2"/>
+  <text x="530" y="220" text-anchor="middle" font-size="14" font-weight="600" fill="#92400e">Heuristic Check</text>
+  <text x="530" y="238" text-anchor="middle" font-size="12" fill="#92400e">rm -rf / | exfil pipe | no-preserve-root</text>
+
+  <!-- Heuristic decision diamond -->
+  <polygon points="740,224 790,200 840,224 790,248" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
+  <text x="790" y="221" text-anchor="middle" font-size="12" font-weight="600" fill="#991b1b">danger?</text>
+  <text x="790" y="237" text-anchor="middle" font-size="11" fill="#991b1b">y/n</text>
+
+  <line x1="660" y1="224" x2="740" y2="224" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- YES → BLOCK -->
+  <line x1="790" y1="200" x2="790" y2="168" stroke="#ef4444" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="715" y="155" width="150" height="32" rx="6" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
+  <text x="790" y="175" text-anchor="middle" font-size="13" font-weight="600" fill="#991b1b">BLOCK (heuristic)</text>
+  <text x="810" y="197" font-size="11" fill="#ef4444">yes</text>
+
+  <!-- NO → right -->
+  <line x1="840" y1="224" x2="910" y2="224" stroke="#22c55e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="872" y="218" text-anchor="middle" font-size="11" fill="#15803d">safe</text>
+
+  <!-- ── LAYER 2: Injection Rail ─────────────────────────────── -->
+  <rect x="10" y="295" width="1140" height="110" rx="10" fill="#e5dbff" stroke="#8b5cf6" stroke-width="1" opacity="0.5"/>
+  <text x="20" y="312" font-size="12" fill="#5b21b6" font-weight="600">Stage 0b — Parallel Injection Rail  (Nebius Nemotron-3.5-Lightning, 3 s timeout, Bash only)</text>
+
+  <line x1="605" y1="248" x2="605" y2="315" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <rect x="380" y="318" width="240" height="52" rx="8" fill="#d0bfff" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="500" y="340" text-anchor="middle" font-size="14" font-weight="600" fill="#3b0764">Injection Rail</text>
+  <text x="500" y="358" text-anchor="middle" font-size="12" fill="#3b0764">asyncio.create_task — parallel to LLM eval</text>
+
+  <!-- Injection decision -->
+  <polygon points="690,344 740,320 790,344 740,368" fill="#eebefa" stroke="#8b5cf6" stroke-width="2"/>
+  <text x="740" y="341" text-anchor="middle" font-size="12" font-weight="600" fill="#3b0764">score</text>
+  <text x="740" y="357" text-anchor="middle" font-size="11" fill="#3b0764">&gt;=0.7?</text>
+
+  <line x1="620" y1="344" x2="690" y2="344" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- YES → BLOCK -->
+  <line x1="740" y1="320" x2="740" y2="290" stroke="#ef4444" stroke-width="2" marker-end="url(#arr)"/>
+  <rect x="665" y="275" width="150" height="30" rx="6" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
+  <text x="740" y="295" text-anchor="middle" font-size="13" font-weight="600" fill="#991b1b">BLOCK (injection)</text>
+  <text x="757" y="318" font-size="11" fill="#ef4444">inject</text>
+
+  <!-- NO → right -->
+  <line x1="790" y1="344" x2="870" y2="344" stroke="#22c55e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="828" y="338" text-anchor="middle" font-size="11" fill="#15803d">clean</text>
+
+  <!-- ── LAYER 3: LLM + Hallucination ───────────────────────── -->
+  <rect x="10" y="425" width="1140" height="130" rx="10" fill="#d3f9d8" stroke="#22c55e" stroke-width="1" opacity="0.5"/>
+  <text x="20" y="442" font-size="12" fill="#15803d" font-weight="600">Stage 1 — LLM Evaluator + Hallucination Detector  (Nebius Qwen3-30B-A3B, ~1–2 s)</text>
+
+  <line x1="605" y1="368" x2="605" y2="445" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Hallucination box -->
+  <rect x="30" y="450" width="220" height="68" rx="8" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/>
+  <text x="140" y="472" text-anchor="middle" font-size="14" font-weight="600" fill="#14532d">Hallucination Detector</text>
+  <text x="140" y="490" text-anchor="middle" font-size="12" fill="#14532d">file_not_found</text>
+  <text x="140" y="506" text-anchor="middle" font-size="12" fill="#14532d">pkg_not_found · flag_not_found</text>
+
+  <!-- LLM eval box -->
+  <rect x="370" y="450" width="220" height="68" rx="8" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/>
+  <text x="480" y="472" text-anchor="middle" font-size="14" font-weight="600" fill="#14532d">LLM Evaluator</text>
+  <text x="480" y="490" text-anchor="middle" font-size="12" fill="#14532d">Qwen3 + policy check</text>
+  <text x="480" y="506" text-anchor="middle" font-size="12" fill="#14532d">+ few-shot accepted decisions</text>
+
+  <!-- Few-shot store -->
+  <rect x="630" y="450" width="185" height="68" rx="8" fill="#c3fae8" stroke="#22c55e" stroke-width="2"/>
+  <text x="722" y="472" text-anchor="middle" font-size="14" font-weight="600" fill="#14532d">Few-Shot Store</text>
+  <text x="722" y="490" text-anchor="middle" font-size="12" fill="#14532d">accepted decisions →</text>
+  <text x="722" y="506" text-anchor="middle" font-size="12" fill="#14532d">injected as examples</text>
+
+  <line x1="630" y1="484" x2="590" y2="484" stroke="#22c55e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Correction arrow hall → llm -->
+  <line x1="250" y1="484" x2="370" y2="484" stroke="#22c55e" stroke-width="2" marker-end="url(#arr)"/>
+  <text x="310" y="478" text-anchor="middle" font-size="11" fill="#15803d">+ correction</text>
+
+  <!-- LLM decision diamond -->
+  <polygon points="890,484 945,455 1000,484 945,513" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/>
+  <text x="945" y="480" text-anchor="middle" font-size="12" font-weight="600" fill="#14532d">decision</text>
+  <text x="945" y="496" text-anchor="middle" font-size="11" fill="#14532d">ALLOW/STEER/BLOCK</text>
+
+  <line x1="815" y1="484" x2="890" y2="484" stroke="#1e1e1e" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ── LAYER 4: Drift Monitor ──────────────────────────────── -->
+  <rect x="10" y="580" width="1140" height="140" rx="10" fill="#ffd8a8" stroke="#f59e0b" stroke-width="1" opacity="0.5"/>
+  <text x="20" y="597" font-size="12" fill="#92400e" font-weight="600">Stage 2 — Drift Monitor  (PostToolUse, LLM-explained nudges injected into agent context)</text>
+
+  <!-- Four drift rule boxes -->
+  <rect x="140" y="606" width="178" height="52" rx="8" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/>
+  <text x="229" y="627" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">failure_spiral</text>
+  <text x="229" y="645" text-anchor="middle" font-size="12" fill="#92400e">4 consecutive fails</text>
+
+  <rect x="340" y="606" width="178" height="52" rx="8" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/>
+  <text x="429" y="627" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">repetition_loop</text>
+  <text x="429" y="645" text-anchor="middle" font-size="12" fill="#92400e">same cmd ×3 in window-10</text>
+
+  <rect x="540" y="606" width="178" height="52" rx="8" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/>
+  <text x="629" y="627" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">tool_cycling</text>
+  <text x="629" y="645" text-anchor="middle" font-size="12" fill="#92400e">rapid tool alternation</text>
+
+  <rect x="740" y="606" width="178" height="52" rx="8" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/>
+  <text x="829" y="627" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">silence_drift</text>
+  <text x="829" y="645" text-anchor="middle" font-size="12" fill="#92400e">no progress detected</text>
+
+  <!-- All rules → LLM explainer -->
+  <line x1="318" y1="632" x2="338" y2="632" stroke="#ef4444" stroke-width="1"/>
+  <line x1="518" y1="632" x2="538" y2="632" stroke="#ef4444" stroke-width="1"/>
+  <line x1="718" y1="632" x2="738" y2="632" stroke="#ef4444" stroke-width="1"/>
+  <line x1="918" y1="632" x2="958" y2="632" stroke="#ef4444" stroke-width="2" marker-end="url(#arr)"/>
+
+  <rect x="958" y="608" width="185" height="68" rx="8" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
+  <text x="1050" y="630" text-anchor="middle" font-size="14" font-weight="600" fill="#991b1b">Qwen3 Explainer</text>
+  <text x="1050" y="648" text-anchor="middle" font-size="12" fill="#991b1b">LLM drift explanation</text>
+  <text x="1050" y="664" text-anchor="middle" font-size="12" fill="#991b1b">→ additionalContext nudge</text>
+
+  <!-- Recovery suppression note -->
+  <rect x="140" y="666" width="800" height="26" rx="6" fill="#fff3bf" stroke="#f59e0b" stroke-width="1"/>
+  <text x="540" y="683" text-anchor="middle" font-size="12" fill="#92400e">Recovery-based suppression: success or tool-change clears the rule — no fixed cooldown</text>
+
+  <!-- ── LAYER 5: Outcomes ───────────────────────────────────── -->
+  <rect x="10" y="745" width="1140" height="60" rx="10" fill="#e5dbff" stroke="#8b5cf6" stroke-width="1" opacity="0.5"/>
+  <text x="20" y="762" font-size="12" fill="#5b21b6" font-weight="600">Outcomes</text>
+
+  <rect x="50" y="758" width="165" height="34" rx="6" fill="#b2f2bb" stroke="#22c55e" stroke-width="2"/>
+  <text x="132" y="779" text-anchor="middle" font-size="13" font-weight="600" fill="#14532d">ALLOW — proceed</text>
+
+  <rect x="240" y="758" width="220" height="34" rx="6" fill="#a5d8ff" stroke="#4a9eed" stroke-width="2"/>
+  <text x="350" y="779" text-anchor="middle" font-size="13" font-weight="600" fill="#1e3a5f">STEER — deny + correction</text>
+
+  <rect x="490" y="758" width="210" height="34" rx="6" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
+  <text x="595" y="779" text-anchor="middle" font-size="13" font-weight="600" fill="#991b1b">BLOCK — deny + reason</text>
+
+  <rect x="730" y="758" width="230" height="34" rx="6" fill="#ffd8a8" stroke="#f59e0b" stroke-width="2"/>
+  <text x="845" y="779" text-anchor="middle" font-size="13" font-weight="600" fill="#92400e">DRIFT NUDGE — steer agent</text>
+
+  <rect x="990" y="758" width="140" height="34" rx="6" fill="#ffc9c9" stroke="#ef4444" stroke-width="2"/>
+  <text x="1060" y="779" text-anchor="middle" font-size="13" font-weight="600" fill="#991b1b">STOP — block</text>
+
+  <!-- ── Footer note ────────────────────────────────────────── -->
+  <text x="580" y="830" text-anchor="middle" font-size="12" fill="#6b7280">Dashboard: http://localhost:8000  ·  Bypass: BURTO_BYPASS=1  ·  Works with Claude Code and OpenCode</text>
+
+  <!-- Arrowhead marker -->
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/>
+    </marker>
+  </defs>
+</svg>
