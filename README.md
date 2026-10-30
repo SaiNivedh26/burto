@@ -8,7 +8,7 @@ Real-time security guard for AI coding agents. Intercepts every tool call, detec
 
 https://github.com/SaiNivedh26/burto/raw/main/demo/burto_demo.mp4
 
-[▶ Watch the 60-second demo](demo/burto_demo.mp4): an agent fixing a JWT bug in `test-codebase/` gets its real file read **allowed**, a hallucinated file and a fake PyPI package **steered**, an env-exfiltration and an injected `rm -rf /` **blocked**, and a pytest failure loop flagged as **drift** with a corrective nudge.
+[▶ Watch the 2-minute narrated demo](demo/burto_demo.mp4): an agent fixing a JWT bug in `test-codebase/` gets its real file read **allowed**, a hallucinated file and a fake PyPI package **steered**, an env-exfiltration and an injected `rm -rf /` **blocked**, and a pytest failure loop flagged as **drift** with a corrective nudge.
 
 Reproduce it yourself:
 
